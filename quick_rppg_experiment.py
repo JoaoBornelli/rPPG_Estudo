@@ -11,7 +11,7 @@ from mediapipe.tasks.python import vision
 # Config de experimento
 # =========================
 MODEL_PATH = "face_landmarker.task"
-SOURCE = "media/1 eu.mp4"  # 0 para webcam
+SOURCE = 0  # 0 para webcam
 
 # Metodos: GREEN | POS | CHROM
 HEART_METHOD = "CHROM"
@@ -285,6 +285,73 @@ def label(frame: np.ndarray, text: str) -> np.ndarray:
     return out
 
 
+def apply_chrom_spatial(region_bgr: np.ndarray, roi_mask_local: np.ndarray, alpha: float) -> np.ndarray:
+    """Aplica CHROM espacialmente e retorna heatmap BGR."""
+    b = region_bgr[:, :, 0].astype(np.float32)
+    g = region_bgr[:, :, 1].astype(np.float32)
+    r = region_bgr[:, :, 2].astype(np.float32)
+    x_ch = 3.0 * r - 2.0 * g
+    y_ch = 1.5 * r + g - 1.5 * b
+    chrom = x_ch - alpha * y_ch
+    chrom[roi_mask_local == 0] = 0.0
+    roi_vals = chrom[roi_mask_local == 255]
+    if roi_vals.size > 0:
+        lo, hi = float(np.percentile(roi_vals, 2)), float(np.percentile(roi_vals, 98))
+        span = hi - lo if hi - lo > 1e-6 else 1.0
+        chrom = np.clip((chrom - lo) / span, 0.0, 1.0)
+    gray = (chrom * 255).astype(np.uint8)
+    gray[roi_mask_local == 0] = 0
+    return cv.applyColorMap(gray, cv.COLORMAP_INFERNO)
+
+
+def build_roi_chrom_tile(frame_bgr: np.ndarray, face_landmarks, chrom_alpha: float = 1.0, target_h: int = 360) -> np.ndarray:
+    h, w = frame_bgr.shape[:2]
+
+    roi_defs = [
+        ("Testa", FOREHEAD_IDX, (255, 255, 100)),
+        ("B.Esq", LEFT_CHEEK_IDX, (100, 255, 100)),
+        ("B.Dir", RIGHT_CHEEK_IDX, (255, 200, 100)),
+    ]
+    n_cols = len(roi_defs)
+    col_w = target_h * 2 // 3
+    tile_w = col_w * n_cols
+    canvas = np.zeros((target_h, tile_w, 3), dtype=np.uint8)
+    header_h = 48
+
+    for col, (roi_name, idx_list, color) in enumerate(roi_defs):
+        pts = landmark_points(face_landmarks, idx_list, w, h)
+        bx, by, bw, bh = cv.boundingRect(pts)
+        pad = 12
+        x1, y1 = max(0, bx - pad), max(0, by - pad)
+        x2, y2 = min(w, bx + bw + pad), min(h, by + bh + pad)
+
+        region = frame_bgr[y1:y2, x1:x2].copy()
+        local_mask = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
+        shifted = pts - np.array([x1, y1])
+        cv.fillConvexPoly(local_mask, cv.convexHull(shifted), 255)
+
+        heatmap = apply_chrom_spatial(region, local_mask, chrom_alpha)
+
+        rh, rw = heatmap.shape[:2]
+        avail_h = target_h - header_h
+        scale = min(col_w / max(rw, 1), avail_h / max(rh, 1))
+        nw, nh = max(1, int(rw * scale)), max(1, int(rh * scale))
+        resized = cv.resize(heatmap, (nw, nh), interpolation=cv.INTER_AREA)
+
+        x_off = col * col_w + (col_w - nw) // 2
+        y_off = header_h + (avail_h - nh) // 2
+        canvas[y_off:y_off + nh, x_off:x_off + nw] = resized
+
+        cv.putText(canvas, roi_name, (col * col_w + 6, header_h - 6), cv.FONT_HERSHEY_SIMPLEX, 0.55, color, 1)
+        if col > 0:
+            cv.line(canvas, (col * col_w, header_h), (col * col_w, target_h - 1), (60, 60, 60), 1)
+
+    cv.rectangle(canvas, (0, 0), (tile_w - 1, target_h - 1), (80, 80, 80), 1)
+    cv.rectangle(canvas, (0, 0), (tile_w - 1, header_h - 14), (0, 0, 0), -1)
+    cv.putText(canvas, f"ROIs - CHROM (alpha={chrom_alpha:.2f})", (8, 22), cv.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1)
+    return canvas
+
+
 def resize_keep_aspect(frame: np.ndarray, target_h: int) -> np.ndarray:
     h, w = frame.shape[:2]
     target_w = max(80, int(round(target_h * (w / float(max(h, 1))))))
@@ -453,6 +520,7 @@ def main() -> None:
         heart_freqs = heart_spec = None
         resp_freqs = resp_spec = None
         peak_hz = resp_hz = None
+        chrom_alpha = 1.0
 
         if len(ts_buffer) > 1:
             ts_all = np.array(ts_buffer, dtype=np.int64)
@@ -468,6 +536,12 @@ def main() -> None:
             b_h = b_all[heart_mask]
 
             if len(ts_h) > 1 and (ts_h[-1] - ts_h[0]) >= int(MIN_HEART_WINDOW_SEC * 1000):
+                # computa alpha do CHROM temporal para usar na visualizacao espacial
+                r_n, g_n, b_n = normalize(r_h), normalize(g_h), normalize(b_h)
+                x_sig = 3.0 * r_n - 2.0 * g_n
+                y_sig = 1.5 * r_n + g_n - 1.5 * b_n
+                chrom_alpha = float(np.std(x_sig) / (np.std(y_sig) + 1e-8))
+
                 sig_h = method_signal(HEART_METHOD, r_h, g_h, b_h)
                 sig_plot = sig_h
                 fs, heart_freqs, heart_spec = compute_psd_standard(
@@ -498,45 +572,32 @@ def main() -> None:
                 resp_rpm, resp_snr, resp_hz = estimate_rate(resp_freqs, resp_spec, RESP_BAND_HZ)
 
         if frame_idx % RENDER_EVERY_N_FRAMES == 0 or last_strip is None:
-            stage1 = label(frame_bgr, "Etapa 1: Frame Original")
-
-            stage2 = frame_bgr.copy()
+            stage_landmarks = frame_bgr.copy()
             if face_box is not None:
                 x, y, w, h = face_box
-                cv.rectangle(stage2, (x, y), (x + w, y + h), (60, 220, 60), 2)
-            if SHOW_LANDMARK_IDS and current_face_landmarks is not None:
-                stage2 = draw_roi_landmark_ids(stage2, current_face_landmarks)
-            stage2 = label(stage2, "Etapa 2: Deteccao de Face")
+                cv.rectangle(stage_landmarks, (x, y), (x + w, y + h), (60, 220, 60), 2)
+            if current_face_landmarks is not None:
+                stage_landmarks = draw_roi_landmark_ids(stage_landmarks, current_face_landmarks)
+            stage_landmarks = label(stage_landmarks, "Facial Landmarks")
 
-            stage3 = np.zeros_like(frame_bgr) if roi_mask is None else cv.cvtColor(roi_mask, cv.COLOR_GRAY2BGR)
-            stage3 = label(stage3, "Etapa 3: Mascara ROI")
-
-            stage4 = frame_bgr.copy() if roi_mask is None else cv.bitwise_and(frame_bgr, frame_bgr, mask=roi_mask)
-            stage4 = label(stage4, "Etapa 4: ROI Aplicada")
-
-            if roi_mask is None:
-                stage5 = np.zeros_like(frame_bgr)
+            if current_face_landmarks is not None:
+                stage_cheeks = build_roi_chrom_tile(frame_bgr, current_face_landmarks, chrom_alpha, TARGET_TILE_HEIGHT)
             else:
-                green = frame_bgr[:, :, 1]
-                green_bgr = cv.cvtColor(green, cv.COLOR_GRAY2BGR)
-                stage5 = cv.bitwise_and(green_bgr, green_bgr, mask=roi_mask)
-            stage5 = label(stage5, "Etapa 5: Canal Verde")
+                stage_cheeks = np.zeros((TARGET_TILE_HEIGHT, TARGET_TILE_HEIGHT, 3), dtype=np.uint8)
+                stage_cheeks = label(stage_cheeks, "ROIs - CHROM")
 
-            stage6 = frame_bgr.copy()
-            cv.putText(stage6, f"BPM: {bpm:.1f}" if bpm is not None else "BPM: --", (20, 80), cv.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-            cv.putText(stage6, f"SNR: {snr:.1f} dB" if snr is not None else "SNR: --", (20, 115), cv.FONT_HERSHEY_SIMPLEX, 0.8, (255, 220, 80), 2)
-            cv.putText(stage6, f"Resp: {resp_rpm:.1f} rpm" if resp_rpm is not None else "Resp: --", (20, 150), cv.FONT_HERSHEY_SIMPLEX, 0.8, (0, 180, 255), 2)
-            cv.putText(stage6, f"Resp SNR: {resp_snr:.1f} dB" if resp_snr is not None else "Resp SNR: --", (20, 185), cv.FONT_HERSHEY_SIMPLEX, 0.72, (190, 220, 255), 2)
-            stage6 = label(stage6, f"Etapa 6: Saida Final ({HEART_METHOD})")
+            stage_final = frame_bgr.copy()
+            cv.putText(stage_final, f"BPM: {bpm:.1f}" if bpm is not None else "BPM: --", (20, 80), cv.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+            cv.putText(stage_final, f"SNR: {snr:.1f} dB" if snr is not None else "SNR: --", (20, 115), cv.FONT_HERSHEY_SIMPLEX, 0.8, (255, 220, 80), 2)
+            cv.putText(stage_final, f"Resp: {resp_rpm:.1f} rpm" if resp_rpm is not None else "Resp: --", (20, 150), cv.FONT_HERSHEY_SIMPLEX, 0.8, (0, 180, 255), 2)
+            cv.putText(stage_final, f"Resp SNR: {resp_snr:.1f} dB" if resp_snr is not None else "Resp SNR: --", (20, 185), cv.FONT_HERSHEY_SIMPLEX, 0.72, (190, 220, 255), 2)
+            stage_final = label(stage_final, f"Resultado Final ({HEART_METHOD})")
 
             last_strip = cv.hconcat(
                 [
-                    resize_keep_aspect(stage1, TARGET_TILE_HEIGHT),
-                    resize_keep_aspect(stage2, TARGET_TILE_HEIGHT),
-                    resize_keep_aspect(stage3, TARGET_TILE_HEIGHT),
-                    resize_keep_aspect(stage4, TARGET_TILE_HEIGHT),
-                    resize_keep_aspect(stage5, TARGET_TILE_HEIGHT),
-                    resize_keep_aspect(stage6, TARGET_TILE_HEIGHT),
+                    resize_keep_aspect(stage_landmarks, TARGET_TILE_HEIGHT),
+                    stage_cheeks,
+                    resize_keep_aspect(stage_final, TARGET_TILE_HEIGHT),
                 ]
             )
 
@@ -551,7 +612,7 @@ def main() -> None:
                     resp_hz,
                 )
 
-        cv.imshow("Pipeline Stages (1..6)", last_strip)
+        cv.imshow("rPPG Pipeline", last_strip)
         if SHOW_GRAPH and last_plot is not None:
             cv.imshow("rPPG Signal Graph", last_plot)
         if SHOW_GRAPH and last_fft_plot is not None:
