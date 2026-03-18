@@ -34,10 +34,14 @@ WELCH_OVERLAP_RESP = 0.75
 TARGET_TILE_HEIGHT = 360
 RENDER_EVERY_N_FRAMES = 1
 SHOW_GRAPH = True
+SHOW_LANDMARK_IDS = True
+SHOW_ALL_LANDMARKS = True
+SHOW_ALL_LANDMARK_IDS = False
+SHOW_ALL_LANDMARK_IDS_EVERY = 20
 
 
 # ROIs (testa + bochechas)
-FOREHEAD_IDX = [10, 67, 103, 109, 338, 297, 332, 284]
+FOREHEAD_IDX = [54, 10, 67, 103, 109, 338, 297, 332, 284]
 LEFT_CHEEK_IDX = [117, 118, 50, 205, 187, 147, 213, 192]
 RIGHT_CHEEK_IDX = [346, 347, 280, 425, 411, 376, 433, 416]
 
@@ -110,6 +114,35 @@ def get_face_rect(face_landmarks, width: int, height: int) -> tuple[int, int, in
     w = max(1, int((x_max - x_min) * width))
     h = max(1, int((y_max - y_min) * height))
     return x, y, w, h
+
+
+def draw_roi_landmark_ids(frame_bgr: np.ndarray, face_landmarks) -> np.ndarray:
+    out = frame_bgr.copy()
+    h, w = out.shape[:2]
+
+    if SHOW_ALL_LANDMARKS:
+        for idx, lm in enumerate(face_landmarks):
+            x = int(np.clip(lm.x * w, 0, w - 1))
+            y = int(np.clip(lm.y * h, 0, h - 1))
+            cv.circle(out, (x, y), 1, (120, 120, 120), -1)
+            if SHOW_ALL_LANDMARK_IDS and idx % SHOW_ALL_LANDMARK_IDS_EVERY == 0:
+                cv.putText(out, str(idx), (x + 2, y - 2), cv.FONT_HERSHEY_SIMPLEX, 0.24, (150, 150, 150), 1)
+
+    def draw_idx(idx: int, color: tuple[int, int, int]) -> None:
+        lm = face_landmarks[idx]
+        x = int(np.clip(lm.x * w, 0, w - 1))
+        y = int(np.clip(lm.y * h, 0, h - 1))
+        cv.circle(out, (x, y), 3, color, -1)
+        cv.putText(out, str(idx), (x + 4, y - 4), cv.FONT_HERSHEY_SIMPLEX, 0.38, color, 1)
+
+    for i in FOREHEAD_IDX:
+        draw_idx(i, (0, 255, 255))  # amarelo
+    for i in LEFT_CHEEK_IDX:
+        draw_idx(i, (0, 255, 0))  # verde
+    for i in RIGHT_CHEEK_IDX:
+        draw_idx(i, (255, 255, 0))  # ciano
+
+    return out
 
 
 def signal_green(r: np.ndarray, g: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -394,8 +427,10 @@ def main() -> None:
 
         roi_mask = None
         face_box = None
+        current_face_landmarks = None
         if result.face_landmarks:
             face_landmarks = result.face_landmarks[0]
+            current_face_landmarks = face_landmarks
             roi_mask = build_roi_mask(frame_rgb, face_landmarks)
             face_box = get_face_rect(face_landmarks, frame_rgb.shape[1], frame_rgb.shape[0])
             roi_pixels = frame_rgb[roi_mask == 255]
@@ -469,6 +504,8 @@ def main() -> None:
             if face_box is not None:
                 x, y, w, h = face_box
                 cv.rectangle(stage2, (x, y), (x + w, y + h), (60, 220, 60), 2)
+            if SHOW_LANDMARK_IDS and current_face_landmarks is not None:
+                stage2 = draw_roi_landmark_ids(stage2, current_face_landmarks)
             stage2 = label(stage2, "Etapa 2: Deteccao de Face")
 
             stage3 = np.zeros_like(frame_bgr) if roi_mask is None else cv.cvtColor(roi_mask, cv.COLOR_GRAY2BGR)
