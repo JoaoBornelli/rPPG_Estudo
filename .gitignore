@@ -1,2 +1,6 @@
 /.venv
 /media
+/src
+/tests
+run_realtime.py
+run_video_file.py
