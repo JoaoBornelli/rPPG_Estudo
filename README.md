@@ -1,26 +1,26 @@
 # rPPG Experiment — Remote Photoplethysmography via Webcam
 
-Pipeline experimental em tempo real para estimativa de frequencia cardiaca (BPM) e frequencia respiratoria (RPM) a partir de video facial, utilizando tecnicas de Remote Photoplethysmography (rPPG).
+Pipeline experimental em tempo real para estimativa de frequência cardíaca (BPM) e frequência respiratória (RPM) a partir de vídeo facial, utilizando técnicas de Remote Photoplethysmography (rPPG).
 
-## Indice
+## Índice
 
-- [Visao Geral do Pipeline](#visao-geral-do-pipeline)
+- [Visão Geral do Pipeline](#visão-geral-do-pipeline)
 - [Requisitos](#requisitos)
 - [Uso](#uso)
 - [Metodologia](#metodologia)
-  - [1. Deteccao Facial e Selecao de ROI](#1-deteccao-facial-e-selecao-de-roi)
-  - [2. Extracao de Sinal — Metodos rPPG](#2-extracao-de-sinal--metodos-rppg)
+  - [1. Detecção Facial e Seleção de ROI](#1-detecção-facial-e-seleção-de-roi)
+  - [2. Extração de Sinal — Métodos rPPG](#2-extração-de-sinal--métodos-rppg)
   - [3. Processamento de Sinal](#3-processamento-de-sinal)
-  - [4. Estimativa de Frequencia via Welch PSD](#4-estimativa-de-frequencia-via-welch-psd)
-  - [5. Visualizacao CHROM Espacial](#5-visualizacao-chrom-espacial)
-- [Peer Review — Analise de Validade Cientifica](#peer-review--analise-de-validade-cientifica)
-- [Limitacoes e Testes](#limitacoes-e-testes)
-- [Parametros de Configuracao](#parametros-de-configuracao)
-- [Referencias](#referencias)
+  - [4. Estimativa de Frequência via Welch PSD](#4-estimativa-de-frequência-via-welch-psd)
+  - [5. Visualização CHROM Espacial](#5-visualização-chrom-espacial)
+- [Peer Review — Análise de Validade Científica](#peer-review--análise-de-validade-científica)
+- [Limitações e Testes](#limitações-e-testes)
+- [Parâmetros de Configuração](#parâmetros-de-configuração)
+- [Referências](#referências)
 
 ---
 
-## Visao Geral do Pipeline
+## Visão Geral do Pipeline
 
 ```
 Webcam (30fps)
@@ -29,25 +29,25 @@ Webcam (30fps)
 MediaPipe Face Landmarker (478 landmarks)
   |
   v
-Selecao de ROI (testa + bochechas bilaterais)
+Seleção de ROI (testa + bochechas bilaterais)
   |
   v
-Media espacial RGB por frame → buffers temporais R(t), G(t), B(t)
+Média espacial RGB por frame → buffers temporais R(t), G(t), B(t)
   |
   v
-Metodo de extracao (GREEN | CHROM | POS) → sinal pulsatil 1D
+Método de extração (GREEN | CHROM | POS) → sinal pulsátil 1D
   |
   v
 Processamento: normalize → detrend linear → bandpass FFT → normalize
   |
   v
-Welch PSD → pico espectral na banda cardiaca/respiratoria
+Welch PSD → pico espectral na banda cardíaca/respiratória
   |
   v
 Estimativa de BPM, RPM e SNR
 ```
 
-A interface exibe tres tiles em tempo real (facial landmarks, heatmap CHROM das ROIs, resultado final com metricas), acompanhados de graficos do sinal temporal e do espectro Welch PSD.
+A interface exibe três tiles em tempo real (facial landmarks, heatmap CHROM das ROIs, resultado final com métricas), acompanhados de gráficos do sinal temporal e do espectro Welch PSD.
 
 ---
 
@@ -77,7 +77,7 @@ python quick_rppg_experiment.py
 
 Esta secao correlaciona cada etapa critica do pipeline com a fundamentacao teorica e as praticas recomendadas pela literatura.
 
-### 1. Deteccao Facial e Selecao de ROI
+### 1. Detecção Facial e Seleção de ROI
 
 **Codigo**: linhas 44-46 (definicao dos landmarks), 79-104 (`build_roi_mask`)
 
@@ -91,7 +91,7 @@ running_mode=vision.RunningMode.VIDEO,
 num_faces=1,
 ```
 
-#### 1.2 Regioes de Interesse (ROI)
+#### 1.2 Regiões de Interesse (ROI)
 
 Tres ROIs anatomicas sao utilizadas:
 
@@ -128,7 +128,7 @@ A envoltoria convexa (`convexHull`) sobre o conjunto esparso de landmarks produz
 
 ---
 
-### 2. Extracao de Sinal — Metodos rPPG
+### 2. Extração de Sinal — Métodos rPPG
 
 O pipeline implementa tres metodos classicos. Todos operam sobre as series temporais de medias espaciais R(t), G(t), B(t) extraidas da ROI.
 
@@ -141,9 +141,9 @@ def signal_green(r, g, b):
     return normalize(g)
 ```
 
-**Principio**: O canal verde (500-600 nm) coincide com o pico de absorcao da oxihemoglobina e desoxihemoglobina, resultando na maior amplitude de sinal pulsatil entre os tres canais RGB [1]. Verkruysse et al. [1] demonstraram pela primeira vez que sinais pletismograficos podem ser detectados remotamente usando camera digital e luz ambiente, com o canal G apresentando SNR superior.
+**Principio**: O canal verde (500-600 nm) coincide com o pico de absorcao da oxihemoglobina e desoxihemoglobina, resultando na maior amplitude de sinal pulsátil entre os tres canais RGB [1]. Verkruysse et al. [1] demonstraram pela primeira vez que sinais pletismograficos podem ser detectados remotamente usando camera digital e luz ambiente, com o canal G apresentando SNR superior.
 
-**Limitacoes**: Sensivel a artefatos de movimento (o canal G captura tanto o sinal pulsatil quanto variacao de iluminacao) e a variacao de cor de pele (alta melanina atenua todos os canais proporcionalmente) [11].
+**Limitacoes**: Sensivel a artefatos de movimento (o canal G captura tanto o sinal pulsátil quanto variacao de iluminacao) e a variacao de cor de pele (alta melanina atenua todos os canais proporcionalmente) [11].
 
 #### 2.2 Metodo CHROM (de Haan & Jeanne 2013)
 
@@ -252,9 +252,9 @@ def bandpass_fft(signal, fs, low_hz, high_hz):
 | Cardiaco | 0.8 - 3.2 Hz | 48 - 192 bpm | [1, 2] |
 | Respiratorio | 0.1 - 0.5 Hz | 6 - 30 rpm | [4] |
 
-A banda cardiaca 0.8-3.2 Hz e consistente com a literatura (tipicamente 0.65-4.0 Hz) [2]. O limite inferior de 0.8 Hz reduz contaminacao pelo componente respiratorio (0.1-0.5 Hz).
+A banda cardíaca 0.8-3.2 Hz e consistente com a literatura (tipicamente 0.65-4.0 Hz) [2]. O limite inferior de 0.8 Hz reduz contaminacao pelo componente respiratorio (0.1-0.5 Hz).
 
-**Nota tecnica**: Esta implementacao usa um filtro ideal (retangular) no dominio da frequencia, que equivale a convolucao com uma funcao sinc no tempo. Isso pode introduzir artefatos de Gibbs (ringing) nas bordas de transientes [14]. A pratica padrao em rPPG e utilizar filtro Butterworth de ordem 3-6, zero-phase (`scipy.signal.sosfiltfilt`) [2, 14]:
+**Nota tecnica**: Esta implementacao usa um filtro ideal (retangular) no dominio da frequência, que equivale a convolucao com uma funcao sinc no tempo. Isso pode introduzir artefatos de Gibbs (ringing) nas bordas de transientes [14]. A pratica padrao em rPPG e utilizar filtro Butterworth de ordem 3-6, zero-phase (`scipy.signal.sosfiltfilt`) [2, 14]:
 
 ```python
 # Alternativa recomendada (nao implementada):
@@ -287,9 +287,9 @@ for start in range(0, n - nperseg + 1, step):
 psd = acc / count                            # media dos periodogramas
 ```
 
-**Fundamentacao**: O metodo de Welch [5] estima a Power Spectral Density (PSD) dividindo o sinal em segmentos sobrepostos, aplicando janelamento, calculando o periodograma de cada segmento e fazendo a media. Isso reduz a variancia da estimativa espectral ao custo de resolucao em frequencia — trade-off fundamental para sinais fisiologicos curtos.
+**Fundamentacao**: O metodo de Welch [5] estima a Power Spectral Density (PSD) dividindo o sinal em segmentos sobrepostos, aplicando janelamento, calculando o periodograma de cada segmento e fazendo a media. Isso reduz a variancia da estimativa espectral ao custo de resolucao em frequência — trade-off fundamental para sinais fisiologicos curtos.
 
-**Analise dos parametros utilizados**:
+**Análise dos parametros utilizados**:
 
 | Parametro | Valor (cardiaco) | Valor (respiratorio) | Efeito |
 |-----------|-------------------|----------------------|--------|
@@ -315,7 +315,7 @@ peak_hz = f[i]
 rate = peak_hz * 60.0                        # conversao Hz → BPM/RPM
 ```
 
-**Fundamentacao**: O argmax no espectro Welch retorna a frequencia do bin com maior potencia dentro da banda fisiologica. E o metodo mais simples e robusto para sinais com pico espectral dominante.
+**Fundamentacao**: O argmax no espectro Welch retorna a frequência do bin com maior potencia dentro da banda fisiologica. E o metodo mais simples e robusto para sinais com pico espectral dominante.
 
 **Resolucao**: Limitada pela largura do bin FFT. Para fs=30 Hz e nperseg=150: df = 0.2 Hz = 12 BPM. Tecnicas mais precisas incluem:
 
@@ -334,7 +334,7 @@ snr_db = 10 * log10(peak_power / noise_power)
 
 ---
 
-### 5. Visualizacao CHROM Espacial
+### 5. Visualização CHROM Espacial
 
 **Codigo**: linhas 288-352 (`apply_chrom_spatial`, `build_roi_chrom_tile`)
 
@@ -352,7 +352,7 @@ A normalizacao por percentil 2%-98% (linhas 299-301) remove outliers para a visu
 
 ---
 
-## Peer Review — Analise de Validade Cientifica
+## Peer Review — Análise de Validade Cientifica
 
 ### Tabela de Conformidade
 
@@ -409,13 +409,13 @@ A validacao foi realizada de forma **comparativa informal**: as leituras de BPM 
 
 | Parametro | Valor Padrao | Descricao |
 |-----------|:------------:|-----------|
-| `HEART_METHOD` | `"CHROM"` | Metodo de extracao cardiaca (GREEN, POS, CHROM) |
-| `RESP_METHOD` | `"GREEN"` | Metodo de extracao respiratoria |
-| `HEART_WINDOW_SEC` | `12.0` | Janela temporal para analise cardiaca (s) |
+| `HEART_METHOD` | `"CHROM"` | Metodo de extracao cardíaca (GREEN, POS, CHROM) |
+| `RESP_METHOD` | `"GREEN"` | Metodo de extracao respiratória |
+| `HEART_WINDOW_SEC` | `12.0` | Janela temporal para analise cardíaca (s) |
 | `MIN_HEART_WINDOW_SEC` | `6.0` | Janela minima para iniciar estimativa (s) |
-| `RESP_WINDOW_SEC` | `30.0` | Janela temporal para analise respiratoria (s) |
-| `HEART_BAND_HZ` | `(0.8, 3.2)` | Banda de frequencia cardiaca (Hz) = 48-192 bpm |
-| `RESP_BAND_HZ` | `(0.1, 0.5)` | Banda de frequencia respiratoria (Hz) = 6-30 rpm |
+| `RESP_WINDOW_SEC` | `30.0` | Janela temporal para analise respiratória (s) |
+| `HEART_BAND_HZ` | `(0.8, 3.2)` | Banda de frequência cardíaca (Hz) = 48-192 bpm |
+| `RESP_BAND_HZ` | `(0.1, 0.5)` | Banda de frequência respiratória (Hz) = 6-30 rpm |
 | `WELCH_SEG_SEC_HEART` | `5.0` | Comprimento do segmento Welch para HR (s) |
 | `WELCH_OVERLAP_HEART` | `0.5` | Sobreposicao dos segmentos Welch (HR) |
 | `TARGET_TILE_HEIGHT` | `360` | Altura dos tiles de visualizacao (px) |
