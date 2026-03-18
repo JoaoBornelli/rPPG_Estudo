@@ -11,19 +11,32 @@ from mediapipe.tasks.python import vision
 # Config de experimento
 # =========================
 MODEL_PATH = "face_landmarker.task"
-SOURCE = "media/WhatsApp Video 2026-03-17 at 20.58.53.mp4"  # 0 para webcam
-WINDOW_SEC = 10.0
-MIN_WINDOW_SEC = 6.0
+SOURCE = "media/1 eu.mp4"  # 0 para webcam
+
+# Metodos: GREEN | POS | CHROM
+HEART_METHOD = "CHROM"
+RESP_METHOD = "GREEN"
+
+HEART_WINDOW_SEC = 12.0
+MIN_HEART_WINDOW_SEC = 6.0
 RESP_WINDOW_SEC = 30.0
 MIN_RESP_WINDOW_SEC = 12.0
-BAND_HZ = (0.8, 3.2)  # 48-192 BPM
+
+HEART_BAND_HZ = (0.8, 3.2)  # 48-192 bpm
 RESP_BAND_HZ = (0.1, 0.5)  # 6-30 rpm
-TARGET_TILE_HEIGHT = 400
+
+# Welch (padrao mais robusto para PSD)
+WELCH_SEG_SEC_HEART = 5.0
+WELCH_OVERLAP_HEART = 0.5
+WELCH_SEG_SEC_RESP = 20.0
+WELCH_OVERLAP_RESP = 0.75
+
+TARGET_TILE_HEIGHT = 360
 RENDER_EVERY_N_FRAMES = 1
 SHOW_GRAPH = True
 
 
-# ROIs simples (testa + bochechas) com índices da malha facial
+# ROIs (testa + bochechas)
 FOREHEAD_IDX = [10, 67, 103, 109, 338, 297, 332, 284]
 LEFT_CHEEK_IDX = [117, 118, 50, 205, 187, 147, 213, 192]
 RIGHT_CHEEK_IDX = [346, 347, 280, 425, 411, 376, 433, 416]
@@ -41,6 +54,14 @@ def create_face_detector(model_path: str) -> vision.FaceLandmarker:
     return vision.FaceLandmarker.create_from_options(options)
 
 
+def normalize(x: np.ndarray) -> np.ndarray:
+    x = x.astype(np.float64)
+    s = np.std(x)
+    if s < 1e-8:
+        return np.zeros_like(x)
+    return (x - np.mean(x)) / s
+
+
 def landmark_points(face_landmarks, idx_list: list[int], width: int, height: int) -> np.ndarray:
     pts = []
     for idx in idx_list:
@@ -54,8 +75,9 @@ def landmark_points(face_landmarks, idx_list: list[int], width: int, height: int
 def build_roi_mask(frame_rgb: np.ndarray, face_landmarks) -> np.ndarray:
     h, w = frame_rgb.shape[:2]
     mask = np.zeros((h, w), dtype=np.uint8)
+
     forehead = landmark_points(face_landmarks, FOREHEAD_IDX, w, h)
-    # Expande levemente a testa para aumentar a area de amostragem rPPG.
+    # expansao leve da testa
     c_x = np.mean(forehead[:, 0])
     c_y = np.mean(forehead[:, 1])
     forehead = np.stack(
@@ -68,8 +90,10 @@ def build_roi_mask(frame_rgb: np.ndarray, face_landmarks) -> np.ndarray:
     forehead[:, 0] = np.clip(forehead[:, 0], 0, w - 1)
     forehead[:, 1] = np.clip(forehead[:, 1], 0, h - 1)
     forehead = forehead.astype(np.int32)
+
     left_cheek = landmark_points(face_landmarks, LEFT_CHEEK_IDX, w, h)
     right_cheek = landmark_points(face_landmarks, RIGHT_CHEEK_IDX, w, h)
+
     cv.fillConvexPoly(mask, cv.convexHull(forehead), 255)
     cv.fillConvexPoly(mask, cv.convexHull(left_cheek), 255)
     cv.fillConvexPoly(mask, cv.convexHull(right_cheek), 255)
@@ -88,54 +112,114 @@ def get_face_rect(face_landmarks, width: int, height: int) -> tuple[int, int, in
     return x, y, w, h
 
 
-def normalize(x: np.ndarray) -> np.ndarray:
-    x = x.astype(np.float64)
-    std = np.std(x)
-    if std < 1e-8:
-        return np.zeros_like(x)
-    return (x - np.mean(x)) / std
+def signal_green(r: np.ndarray, g: np.ndarray, b: np.ndarray) -> np.ndarray:
+    return normalize(g)
 
 
-def pos_from_rgb(r_series: np.ndarray, g_series: np.ndarray, b_series: np.ndarray) -> np.ndarray:
-    r = r_series.astype(np.float64)
-    g = g_series.astype(np.float64)
-    b = b_series.astype(np.float64)
-
-    rgb = np.vstack([r, g, b])
+def signal_pos(r: np.ndarray, g: np.ndarray, b: np.ndarray) -> np.ndarray:
+    rgb = np.vstack([r.astype(np.float64), g.astype(np.float64), b.astype(np.float64)])
     means = np.mean(rgb, axis=1, keepdims=True)
     means[means == 0.0] = 1.0
     c = (rgb / means) - 1.0
-
     x = c[1] - c[2]
     y = c[1] + c[2] - 2.0 * c[0]
     alpha = np.std(x) / (np.std(y) + 1e-8)
-    pos = x + alpha * y
-    return normalize(pos)
+    return normalize(x + alpha * y)
 
 
-def compute_fft(signal: np.ndarray, timestamps_ms: np.ndarray) -> tuple[np.ndarray | None, float | None, np.ndarray | None, np.ndarray | None]:
-    if len(signal) < 16 or len(timestamps_ms) < 2:
-        return None, None, None, None
+def signal_chrom(r: np.ndarray, g: np.ndarray, b: np.ndarray) -> np.ndarray:
+    r_n = normalize(r)
+    g_n = normalize(g)
+    b_n = normalize(b)
+    x = 3.0 * r_n - 2.0 * g_n
+    y = 1.5 * r_n + g_n - 1.5 * b_n
+    alpha = np.std(x) / (np.std(y) + 1e-8)
+    return normalize(x - alpha * y)
 
+
+def method_signal(name: str, r: np.ndarray, g: np.ndarray, b: np.ndarray) -> np.ndarray:
+    if name.upper() == "GREEN":
+        return signal_green(r, g, b)
+    if name.upper() == "POS":
+        return signal_pos(r, g, b)
+    return signal_chrom(r, g, b)
+
+
+def sampling_rate_from_timestamps(timestamps_ms: np.ndarray) -> float | None:
+    if len(timestamps_ms) < 2:
+        return None
     dt = np.diff(timestamps_ms.astype(np.float64)) / 1000.0
     dt = dt[dt > 0]
     if dt.size == 0:
-        return None, None, None, None
-    fs = 1.0 / np.mean(dt)
+        return None
+    return float(1.0 / np.mean(dt))
 
-    sig = signal.astype(np.float64)
-    # Remove deriva muito lenta (iluminacao/exposicao), sem suprimir batimentos baixos como ~50 bpm.
-    hp_cut_hz = 0.2
-    spec_hp = np.fft.rfft(sig)
-    freqs_hp = np.fft.rfftfreq(len(sig), d=1.0 / fs)
-    spec_hp[freqs_hp < hp_cut_hz] = 0.0
-    sig = np.fft.irfft(spec_hp, n=len(sig))
+
+def detrend_linear(signal: np.ndarray) -> np.ndarray:
+    n = len(signal)
+    if n < 3:
+        return signal
+    x = np.arange(n, dtype=np.float64)
+    p = np.polyfit(x, signal.astype(np.float64), deg=1)
+    return signal - (p[0] * x + p[1])
+
+
+def bandpass_fft(signal: np.ndarray, fs: float, low_hz: float, high_hz: float) -> np.ndarray:
+    if len(signal) < 4:
+        return signal
+    spec = np.fft.rfft(signal.astype(np.float64))
+    freqs = np.fft.rfftfreq(len(signal), d=1.0 / fs)
+    mask = (freqs >= low_hz) & (freqs <= high_hz)
+    spec[~mask] = 0.0
+    return np.fft.irfft(spec, n=len(signal))
+
+
+def welch_psd(signal: np.ndarray, fs: float, seg_sec: float, overlap: float) -> tuple[np.ndarray | None, np.ndarray | None]:
+    n = len(signal)
+    if n < 16:
+        return None, None
+
+    nperseg = int(round(seg_sec * fs))
+    nperseg = max(32, min(nperseg, n))
+    step = int(round(nperseg * (1.0 - overlap)))
+    step = max(1, step)
+    if n < nperseg:
+        return None, None
+
+    win = np.hanning(nperseg)
+    win_pow = np.sum(win**2) + 1e-12
+    acc = None
+    count = 0
+    for start in range(0, n - nperseg + 1, step):
+        seg = signal[start:start + nperseg]
+        seg = seg - np.mean(seg)
+        p = (np.abs(np.fft.rfft(seg * win)) ** 2) / win_pow
+        acc = p if acc is None else acc + p
+        count += 1
+
+    if acc is None or count == 0:
+        return None, None
+    return np.fft.rfftfreq(nperseg, d=1.0 / fs), acc / float(count)
+
+
+def compute_psd_standard(
+    signal: np.ndarray,
+    timestamps_ms: np.ndarray,
+    band_hz: tuple[float, float],
+    welch_seg_sec: float,
+    welch_overlap: float,
+) -> tuple[float | None, np.ndarray | None, np.ndarray | None]:
+    fs = sampling_rate_from_timestamps(timestamps_ms)
+    if fs is None or len(signal) < 16:
+        return None, None, None
+
+    sig = normalize(signal.astype(np.float64))
+    sig = detrend_linear(sig)
+    sig = bandpass_fft(sig, fs, band_hz[0], band_hz[1])
     sig = normalize(sig)
-    n = len(sig)
-    window = np.hanning(n)
-    spec = np.abs(np.fft.rfft(sig * window)) ** 2
-    freqs = np.fft.rfftfreq(n, d=1.0 / fs)
-    return sig, float(fs), freqs, spec
+
+    freqs, spec = welch_psd(sig, fs, welch_seg_sec, welch_overlap)
+    return fs, freqs, spec
 
 
 def estimate_rate(
@@ -145,24 +229,25 @@ def estimate_rate(
 ) -> tuple[float | None, float | None, float | None]:
     if freqs is None or spec is None:
         return None, None, None
+
     mask = (freqs >= band_hz[0]) & (freqs <= band_hz[1])
     if not np.any(mask):
         return None, None, None
 
-    b_spec = spec[mask]
-    b_freqs = freqs[mask]
-    idx = int(np.argmax(b_spec))
-    peak_hz = float(b_freqs[idx])
+    s = spec[mask]
+    f = freqs[mask]
+    i = int(np.argmax(s))
+    peak_hz = float(f[i])
     rate = peak_hz * 60.0
-    peak_power = float(b_spec[idx])
-    noise_power = float((np.sum(b_spec) - peak_power) / max(len(b_spec) - 1, 1))
+    peak_power = float(s[i])
+    noise_power = float((np.sum(s) - peak_power) / max(len(s) - 1, 1))
     snr_db = 10.0 * np.log10((peak_power + 1e-12) / (noise_power + 1e-12))
     return float(rate), float(snr_db), peak_hz
 
 
 def label(frame: np.ndarray, text: str) -> np.ndarray:
     out = frame.copy()
-    cv.rectangle(out, (8, 8), (350, 42), (0, 0, 0), -1)
+    cv.rectangle(out, (8, 8), (420, 42), (0, 0, 0), -1)
     cv.putText(out, text, (16, 32), cv.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
     return out
 
@@ -170,8 +255,7 @@ def label(frame: np.ndarray, text: str) -> np.ndarray:
 def resize_keep_aspect(frame: np.ndarray, target_h: int) -> np.ndarray:
     h, w = frame.shape[:2]
     target_w = max(80, int(round(target_h * (w / float(max(h, 1))))))
-    resized = cv.resize(frame, (target_w, target_h), interpolation=cv.INTER_AREA)
-    return resized
+    return cv.resize(frame, (target_w, target_h), interpolation=cv.INTER_AREA)
 
 
 def build_plot(signal: np.ndarray | None, fs: float | None, bpm: float | None, width: int = 900, height: int = 260) -> np.ndarray:
@@ -212,67 +296,58 @@ def build_plot(signal: np.ndarray | None, fs: float | None, bpm: float | None, w
 
 
 def build_fft_plot(
-    freqs: np.ndarray | None,
-    spec: np.ndarray | None,
-    peak_hz: float | None,
-    resp_hz: float | None,
+    heart_freqs: np.ndarray | None,
+    heart_spec: np.ndarray | None,
+    heart_peak_hz: float | None,
+    resp_freqs: np.ndarray | None,
+    resp_spec: np.ndarray | None,
+    resp_peak_hz: float | None,
     width: int = 900,
     height: int = 300,
 ) -> np.ndarray:
     canvas = np.full((height, width, 3), 18, dtype=np.uint8)
     cv.rectangle(canvas, (0, 0), (width - 1, height - 1), (80, 80, 80), 1)
-    cv.putText(canvas, "FFT/PSD usada no BPM", (14, 24), cv.FONT_HERSHEY_SIMPLEX, 0.62, (220, 220, 220), 1)
-
-    if freqs is None or spec is None or len(freqs) < 2:
-        cv.putText(canvas, "FFT indisponivel", (14, 56), cv.FONT_HERSHEY_SIMPLEX, 0.62, (0, 160, 255), 2)
-        return canvas
+    cv.putText(canvas, "Welch PSD (heart + resp)", (14, 24), cv.FONT_HERSHEY_SIMPLEX, 0.62, (220, 220, 220), 1)
 
     left, right = 18, width - 18
     top, bottom = 36, height - 28
+    max_hz = max(HEART_BAND_HZ[1] * 1.15, 4.5)
 
-    max_hz = max(BAND_HZ[1] * 1.15, 4.5)
-    valid = (freqs >= 0.0) & (freqs <= max_hz)
-    f = freqs[valid]
-    s = spec[valid]
-    if len(f) < 2:
-        cv.putText(canvas, "FFT insuficiente", (14, 56), cv.FONT_HERSHEY_SIMPLEX, 0.62, (0, 160, 255), 2)
-        return canvas
+    rx0 = int(left + (RESP_BAND_HZ[0] / max_hz) * (right - left))
+    rx1 = int(left + (RESP_BAND_HZ[1] / max_hz) * (right - left))
+    hx0 = int(left + (HEART_BAND_HZ[0] / max_hz) * (right - left))
+    hx1 = int(left + (HEART_BAND_HZ[1] / max_hz) * (right - left))
+    cv.rectangle(canvas, (rx0, top), (rx1, bottom), (45, 35, 25), -1)
+    cv.rectangle(canvas, (hx0, top), (hx1, bottom), (35, 55, 35), -1)
 
-    s = s.astype(np.float64)
-    s = np.log10(s + 1e-12)
-    s -= np.min(s)
-    denom = np.max(s) - np.min(s)
-    if denom < 1e-8:
-        s_norm = np.zeros_like(s)
-    else:
-        s_norm = s / denom
+    def draw_curve(freqs: np.ndarray | None, spec: np.ndarray | None, color: tuple[int, int, int], thickness: int) -> None:
+        if freqs is None or spec is None or len(freqs) < 2:
+            return
+        keep = (freqs >= 0.0) & (freqs <= max_hz)
+        f = freqs[keep]
+        s = spec[keep]
+        if len(f) < 2:
+            return
+        s_shift = s - np.min(s)
+        den = np.max(s_shift) - np.min(s_shift)
+        s_norm = np.zeros_like(s_shift) if den < 1e-12 else s_shift / den
+        x = (left + (f / max_hz) * (right - left)).astype(np.int32)
+        y = (bottom - s_norm * (bottom - top)).astype(np.int32)
+        pts = np.stack([x, y], axis=1).reshape(-1, 1, 2)
+        cv.polylines(canvas, [pts], isClosed=False, color=color, thickness=thickness)
 
-    # banda respiratoria destacada
-    resp_x0 = int(left + (RESP_BAND_HZ[0] / max_hz) * (right - left))
-    resp_x1 = int(left + (RESP_BAND_HZ[1] / max_hz) * (right - left))
-    cv.rectangle(canvas, (resp_x0, top), (resp_x1, bottom), (45, 35, 25), -1)
+    draw_curve(heart_freqs, heart_spec, (80, 220, 240), 2)
+    draw_curve(resp_freqs, resp_spec, (0, 180, 255), 1)
 
-    # banda cardiaca destacada
-    band_x0 = int(left + (BAND_HZ[0] / max_hz) * (right - left))
-    band_x1 = int(left + (BAND_HZ[1] / max_hz) * (right - left))
-    cv.rectangle(canvas, (band_x0, top), (band_x1, bottom), (35, 55, 35), -1)
-
-    x = (left + (f / max_hz) * (right - left)).astype(np.int32)
-    y = (bottom - s_norm * (bottom - top)).astype(np.int32)
-    points = np.stack([x, y], axis=1).reshape(-1, 1, 2)
-    cv.polylines(canvas, [points], isClosed=False, color=(80, 220, 240), thickness=2)
-
-    if peak_hz is not None:
-        px = int(left + (peak_hz / max_hz) * (right - left))
-        cv.line(canvas, (px, top), (px, bottom), (0, 230, 90), 2)
-        cv.putText(canvas, f"peak={peak_hz:.2f} Hz ({peak_hz * 60.0:.1f} BPM)", (14, height - 8), cv.FONT_HERSHEY_SIMPLEX, 0.52, (220, 220, 220), 1)
-
-    if resp_hz is not None:
-        rx = int(left + (resp_hz / max_hz) * (right - left))
-        cv.line(canvas, (rx, top), (rx, bottom), (0, 180, 255), 2)
+    if heart_peak_hz is not None:
+        xh = int(left + (heart_peak_hz / max_hz) * (right - left))
+        cv.line(canvas, (xh, top), (xh, bottom), (0, 230, 90), 2)
+    if resp_peak_hz is not None:
+        xr = int(left + (resp_peak_hz / max_hz) * (right - left))
+        cv.line(canvas, (xr, top), (xr, bottom), (0, 180, 255), 2)
 
     cv.putText(canvas, f"Resp: {RESP_BAND_HZ[0]:.1f}-{RESP_BAND_HZ[1]:.1f} Hz", (width - 330, 24), cv.FONT_HERSHEY_SIMPLEX, 0.5, (180, 200, 255), 1)
-    cv.putText(canvas, f"Cardio: {BAND_HZ[0]:.1f}-{BAND_HZ[1]:.1f} Hz", (width - 330, 44), cv.FONT_HERSHEY_SIMPLEX, 0.5, (180, 220, 180), 1)
+    cv.putText(canvas, f"Heart: {HEART_BAND_HZ[0]:.1f}-{HEART_BAND_HZ[1]:.1f} Hz", (width - 330, 44), cv.FONT_HERSHEY_SIMPLEX, 0.5, (180, 220, 180), 1)
     return canvas
 
 
@@ -285,6 +360,7 @@ def main() -> None:
     nominal_fps = reported_fps if np.isfinite(reported_fps) and 1.0 <= reported_fps <= 240.0 else 30.0
     step_ms = max(1, int(round(1000.0 / nominal_fps)))
     print(f"[VideoSource] FPS detectado: {nominal_fps:.2f}")
+    print(f"[Methods] HEART={HEART_METHOD} | RESP={RESP_METHOD}")
 
     detector = create_face_detector(MODEL_PATH)
 
@@ -316,73 +392,75 @@ def main() -> None:
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
         result = detector.detect_for_video(mp_image, t_ms)
 
-        has_face = bool(result.face_landmarks)
         roi_mask = None
         face_box = None
-        r_mean = None
-        g_mean = None
-        b_mean = None
-        if has_face:
+        if result.face_landmarks:
             face_landmarks = result.face_landmarks[0]
             roi_mask = build_roi_mask(frame_rgb, face_landmarks)
             face_box = get_face_rect(face_landmarks, frame_rgb.shape[1], frame_rgb.shape[0])
             roi_pixels = frame_rgb[roi_mask == 255]
             if roi_pixels.size > 0:
-                r_mean = float(np.mean(roi_pixels[:, 0]))
-                g_mean = float(np.mean(roi_pixels[:, 1]))
-                b_mean = float(np.mean(roi_pixels[:, 2]))
+                r_buffer.append(float(np.mean(roi_pixels[:, 0])))
+                g_buffer.append(float(np.mean(roi_pixels[:, 1])))
+                b_buffer.append(float(np.mean(roi_pixels[:, 2])))
+                ts_buffer.append(t_ms)
 
-        if r_mean is not None and g_mean is not None and b_mean is not None:
-            r_buffer.append(r_mean)
-            g_buffer.append(g_mean)
-            b_buffer.append(b_mean)
-            ts_buffer.append(t_ms)
-
-        max_window_sec = max(WINDOW_SEC, RESP_WINDOW_SEC)
+        max_window_sec = max(HEART_WINDOW_SEC, RESP_WINDOW_SEC)
         while len(ts_buffer) > 1 and (ts_buffer[-1] - ts_buffer[0]) > int(max_window_sec * 1000):
             r_buffer.popleft()
-            ts_buffer.popleft()
             g_buffer.popleft()
             b_buffer.popleft()
+            ts_buffer.popleft()
 
-        bpm = None
+        bpm = snr = resp_rpm = resp_snr = None
         fs = None
-        snr = None
-        resp_rpm = None
-        resp_snr = None
         sig_plot = None
-        fft_freqs = None
-        fft_spec = None
-        peak_hz = None
-        resp_hz = None
+        heart_freqs = heart_spec = None
+        resp_freqs = resp_spec = None
+        peak_hz = resp_hz = None
+
         if len(ts_buffer) > 1:
-            ts_arr_all = np.array(ts_buffer, dtype=np.int64)
-            r_arr_all = np.array(r_buffer, dtype=np.float64)
-            g_arr_all = np.array(g_buffer, dtype=np.float64)
-            b_arr_all = np.array(b_buffer, dtype=np.float64)
+            ts_all = np.array(ts_buffer, dtype=np.int64)
+            r_all = np.array(r_buffer, dtype=np.float64)
+            g_all = np.array(g_buffer, dtype=np.float64)
+            b_all = np.array(b_buffer, dtype=np.float64)
 
-            cardio_start_ts = ts_arr_all[-1] - int(WINDOW_SEC * 1000.0)
-            cardio_mask = ts_arr_all >= cardio_start_ts
-            ts_arr = ts_arr_all[cardio_mask]
-            r_arr = r_arr_all[cardio_mask]
-            g_arr = g_arr_all[cardio_mask]
-            b_arr = b_arr_all[cardio_mask]
+            heart_start = ts_all[-1] - int(HEART_WINDOW_SEC * 1000.0)
+            heart_mask = ts_all >= heart_start
+            ts_h = ts_all[heart_mask]
+            r_h = r_all[heart_mask]
+            g_h = g_all[heart_mask]
+            b_h = b_all[heart_mask]
 
-            if len(ts_arr) > 1 and (ts_arr[-1] - ts_arr[0]) >= int(MIN_WINDOW_SEC * 1000):
-                pos_sig = pos_from_rgb(r_arr, g_arr, b_arr)
-                sig_plot = normalize(pos_sig)
-                _, fs, fft_freqs, fft_spec = compute_fft(pos_sig, ts_arr)
-                if fs is not None:
-                    bpm, snr, peak_hz = estimate_rate(fft_freqs, fft_spec, BAND_HZ)
+            if len(ts_h) > 1 and (ts_h[-1] - ts_h[0]) >= int(MIN_HEART_WINDOW_SEC * 1000):
+                sig_h = method_signal(HEART_METHOD, r_h, g_h, b_h)
+                sig_plot = sig_h
+                fs, heart_freqs, heart_spec = compute_psd_standard(
+                    sig_h,
+                    ts_h,
+                    HEART_BAND_HZ,
+                    WELCH_SEG_SEC_HEART,
+                    WELCH_OVERLAP_HEART,
+                )
+                bpm, snr, peak_hz = estimate_rate(heart_freqs, heart_spec, HEART_BAND_HZ)
 
-            resp_start_ts = ts_arr_all[-1] - int(RESP_WINDOW_SEC * 1000.0)
-            resp_mask = ts_arr_all >= resp_start_ts
-            ts_resp = ts_arr_all[resp_mask]
-            g_resp = g_arr_all[resp_mask]
-            if len(ts_resp) > 1 and (ts_resp[-1] - ts_resp[0]) >= int(MIN_RESP_WINDOW_SEC * 1000):
-                _, fs_resp, freqs_resp, spec_resp = compute_fft(normalize(g_resp), ts_resp)
-                if fs_resp is not None:
-                    resp_rpm, resp_snr, resp_hz = estimate_rate(freqs_resp, spec_resp, RESP_BAND_HZ)
+            resp_start = ts_all[-1] - int(RESP_WINDOW_SEC * 1000.0)
+            resp_mask = ts_all >= resp_start
+            ts_r = ts_all[resp_mask]
+            r_r = r_all[resp_mask]
+            g_r = g_all[resp_mask]
+            b_r = b_all[resp_mask]
+
+            if len(ts_r) > 1 and (ts_r[-1] - ts_r[0]) >= int(MIN_RESP_WINDOW_SEC * 1000):
+                sig_r = method_signal(RESP_METHOD, r_r, g_r, b_r)
+                _, resp_freqs, resp_spec = compute_psd_standard(
+                    sig_r,
+                    ts_r,
+                    RESP_BAND_HZ,
+                    WELCH_SEG_SEC_RESP,
+                    WELCH_OVERLAP_RESP,
+                )
+                resp_rpm, resp_snr, resp_hz = estimate_rate(resp_freqs, resp_spec, RESP_BAND_HZ)
 
         if frame_idx % RENDER_EVERY_N_FRAMES == 0 or last_strip is None:
             stage1 = label(frame_bgr, "Etapa 1: Frame Original")
@@ -393,16 +471,10 @@ def main() -> None:
                 cv.rectangle(stage2, (x, y), (x + w, y + h), (60, 220, 60), 2)
             stage2 = label(stage2, "Etapa 2: Deteccao de Face")
 
-            if roi_mask is None:
-                stage3 = np.zeros_like(frame_bgr)
-            else:
-                stage3 = cv.cvtColor(roi_mask, cv.COLOR_GRAY2BGR)
+            stage3 = np.zeros_like(frame_bgr) if roi_mask is None else cv.cvtColor(roi_mask, cv.COLOR_GRAY2BGR)
             stage3 = label(stage3, "Etapa 3: Mascara ROI")
 
-            if roi_mask is None:
-                stage4 = frame_bgr.copy()
-            else:
-                stage4 = cv.bitwise_and(frame_bgr, frame_bgr, mask=roi_mask)
+            stage4 = frame_bgr.copy() if roi_mask is None else cv.bitwise_and(frame_bgr, frame_bgr, mask=roi_mask)
             stage4 = label(stage4, "Etapa 4: ROI Aplicada")
 
             if roi_mask is None:
@@ -414,15 +486,11 @@ def main() -> None:
             stage5 = label(stage5, "Etapa 5: Canal Verde")
 
             stage6 = frame_bgr.copy()
-            bpm_text = f"BPM: {bpm:.1f}" if bpm is not None else "BPM: --"
-            snr_text = f"SNR: {snr:.1f} dB" if snr is not None else "SNR: --"
-            resp_text = f"Resp: {resp_rpm:.1f} rpm" if resp_rpm is not None else "Resp: --"
-            resp_snr_text = f"Resp SNR: {resp_snr:.1f} dB" if resp_snr is not None else "Resp SNR: --"
-            cv.putText(stage6, bpm_text, (20, 80), cv.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-            cv.putText(stage6, snr_text, (20, 115), cv.FONT_HERSHEY_SIMPLEX, 0.8, (255, 220, 80), 2)
-            cv.putText(stage6, resp_text, (20, 150), cv.FONT_HERSHEY_SIMPLEX, 0.8, (0, 180, 255), 2)
-            cv.putText(stage6, resp_snr_text, (20, 185), cv.FONT_HERSHEY_SIMPLEX, 0.72, (190, 220, 255), 2)
-            stage6 = label(stage6, "Etapa 6: Saida Final")
+            cv.putText(stage6, f"BPM: {bpm:.1f}" if bpm is not None else "BPM: --", (20, 80), cv.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+            cv.putText(stage6, f"SNR: {snr:.1f} dB" if snr is not None else "SNR: --", (20, 115), cv.FONT_HERSHEY_SIMPLEX, 0.8, (255, 220, 80), 2)
+            cv.putText(stage6, f"Resp: {resp_rpm:.1f} rpm" if resp_rpm is not None else "Resp: --", (20, 150), cv.FONT_HERSHEY_SIMPLEX, 0.8, (0, 180, 255), 2)
+            cv.putText(stage6, f"Resp SNR: {resp_snr:.1f} dB" if resp_snr is not None else "Resp SNR: --", (20, 185), cv.FONT_HERSHEY_SIMPLEX, 0.72, (190, 220, 255), 2)
+            stage6 = label(stage6, f"Etapa 6: Saida Final ({HEART_METHOD})")
 
             last_strip = cv.hconcat(
                 [
@@ -434,15 +502,23 @@ def main() -> None:
                     resize_keep_aspect(stage6, TARGET_TILE_HEIGHT),
                 ]
             )
+
             if SHOW_GRAPH:
                 last_plot = build_plot(sig_plot, fs, bpm)
-                last_fft_plot = build_fft_plot(fft_freqs, fft_spec, peak_hz, resp_hz)
+                last_fft_plot = build_fft_plot(
+                    heart_freqs,
+                    heart_spec,
+                    peak_hz,
+                    resp_freqs,
+                    resp_spec,
+                    resp_hz,
+                )
 
         cv.imshow("Pipeline Stages (1..6)", last_strip)
         if SHOW_GRAPH and last_plot is not None:
             cv.imshow("rPPG Signal Graph", last_plot)
         if SHOW_GRAPH and last_fft_plot is not None:
-            cv.imshow("rPPG FFT Spectrum", last_fft_plot)
+            cv.imshow("rPPG Welch PSD", last_fft_plot)
 
         if cv.waitKey(1) & 0xFF == 27:
             break
