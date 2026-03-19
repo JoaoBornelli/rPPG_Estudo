@@ -31,6 +31,13 @@ let lastHeartResult = null;
 let lastRespResult  = null;
 let currentStream   = null;
 
+// EMA smoothing
+let smoothBpm = null;
+let smoothRpm = null;
+const EMA_ALPHA_HEART = 0.15;
+const EMA_ALPHA_RESP  = 0.10;
+const SNR_MIN_DB      = 2.0;
+
 // History for summary (sampled every ~5s when valid)
 let heartHistory = [];   // [{bpm, snrDb}]
 let respHistory  = [];   // [{rpm}]
@@ -183,8 +190,8 @@ function updateQualityBar(snrDb) {
 function updateMetrics() {
   const bufSec = bufferLengthSec();
 
-  if (lastHeartResult) {
-    bpmEl.textContent = Math.round(lastHeartResult.bpm);
+  if (smoothBpm !== null && lastHeartResult) {
+    bpmEl.textContent = Math.round(smoothBpm);
     snrEl.textContent = lastHeartResult.snrDb.toFixed(1) + " dB";
     updateQualityBar(lastHeartResult.snrDb);
   } else {
@@ -193,7 +200,7 @@ function updateMetrics() {
     updateQualityBar(null);
   }
 
-  rpmEl.textContent = lastRespResult ? Math.round(lastRespResult.rpm) : "--";
+  rpmEl.textContent = smoothRpm !== null ? Math.round(smoothRpm) : "--";
 
   if (bufSec < 2) {
     statusEl.textContent = "Posicione o rosto na câmera...";
@@ -240,10 +247,27 @@ async function processFrame(timestampMs) {
 
   if (timestampMs - lastComputeMs > COMPUTE_INTERVAL_MS) {
     lastComputeMs = timestampMs;
+
     const heart = computeHeartRate();
-    if (heart) lastHeartResult = heart;
+    if (heart) {
+      lastHeartResult = heart;
+      if (heart.snrDb >= SNR_MIN_DB) {
+        smoothBpm = smoothBpm === null
+          ? heart.bpm
+          : EMA_ALPHA_HEART * heart.bpm + (1 - EMA_ALPHA_HEART) * smoothBpm;
+      }
+    }
+
     const resp = computeRespRate();
-    if (resp) lastRespResult = resp;
+    if (resp) {
+      lastRespResult = resp;
+      if (resp.snrDb >= SNR_MIN_DB) {
+        smoothRpm = smoothRpm === null
+          ? resp.rpm
+          : EMA_ALPHA_RESP * resp.rpm + (1 - EMA_ALPHA_RESP) * smoothRpm;
+      }
+    }
+
     updateMetrics();
   }
 
@@ -384,6 +408,8 @@ startBtn.addEventListener("click", async () => {
     lastComputeMs   = 0;
     lastSampleMs    = 0;
     sessionStart    = Date.now();
+    smoothBpm       = null;
+    smoothRpm       = null;
     resetBuffers();
     stopBtn.hidden = false;
     requestAnimationFrame(processFrame);
