@@ -1,0 +1,4 @@
+.vercel
+node_modules
+# Don't ignore the model — Vercel needs it
+# !assets/face_landmarker.task

@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>rPPG — Monitor Cardíaco</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <video id="cam" playsinline autoplay muted></video>
+    <canvas id="overlay"></canvas>
+
+    <div id="metrics">
+      <div class="metric">
+        <span class="value" id="bpm">--</span>
+        <span class="label">BPM</span>
+      </div>
+      <div class="metric">
+        <span class="value" id="rpm">--</span>
+        <span class="label">RPM</span>
+      </div>
+      <div class="metric snr-metric">
+        <span class="value small" id="snr">--</span>
+        <span class="label">SNR</span>
+      </div>
+    </div>
+
+    <div id="quality-bar">
+      <div id="quality-fill"></div>
+    </div>
+
+    <div id="status">Toque em Iniciar para começar</div>
+
+    <button id="start-btn">Iniciar</button>
+    <button id="stop-btn" hidden>Parar</button>
+
+    <div id="loading" hidden>
+      <div class="spinner"></div>
+      <span>Carregando modelo...</span>
+    </div>
+
+    <!-- Summary screen -->
+    <div id="summary" hidden>
+      <h2>Resultado da Sessão</h2>
+      <div id="summary-items"></div>
+      <button id="restart-btn">Nova Leitura</button>
+    </div>
+  </div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
