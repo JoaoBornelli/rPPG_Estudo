@@ -2,9 +2,29 @@
 
 Pipeline experimental em tempo real para estimativa de frequência cardíaca (BPM) e frequência respiratória (RPM) a partir de vídeo facial, utilizando técnicas de Remote Photoplethysmography (rPPG).
 
+Este repositório contém **duas partes complementares**:
+
+| Parte | Descrição | Localização |
+|-------|-----------|-------------|
+| **Experimento Python** | Pipeline desktop para pesquisa e comparação de métodos rPPG (GREEN, CHROM, POS). Foco em experimentação e análise científica detalhada. | `quick_rppg_experiment.py` |
+| **Web App (Vercel)** | Aplicação mobile-first para uso por qualquer usuário no navegador. Implementa exclusivamente o método CHROM, seguindo as recomendações da literatura científica. Disponível em: https://eye-tracker-nine-vercel.app | `webapp/` |
+
+### Diferenças entre as partes
+
+O experimento Python foi desenvolvido para **testar e comparar diferentes métodos** de extração de sinal rPPG (GREEN, CHROM e POS), com visualizações detalhadas (heatmap CHROM, gráficos de espectro Welch PSD, tiles de diagnóstico) voltadas para análise.
+
+Com base nas análises e aprendizados do experimento, foi desenvolvida a **web app** com foco em usabilidade em dispositivos móveis. A web app:
+- Implementa **apenas o método CHROM**, por ser o de maior robustez comprovada na literatura para condições de uso real
+- Utiliza a câmera frontal do dispositivo móvel
+- Aplica EMA (Exponential Moving Average) com filtragem baseada em SNR para estabilizar as leituras
+- Exibe BPM, RPM e SNR em tempo real, com tela de resumo ao final da sessão
+- Segue mais estritamente as recomendações das pesquisas científicas em relação ao pipeline de produção
+
+---
+
 ## Índice
 
-- [Visão Geral do Pipeline](#visão-geral-do-pipeline)
+- [Visão Geral do Pipeline (Python)](#visão-geral-do-pipeline)
 - [Requisitos](#requisitos)
 - [Uso](#uso)
 - [Metodologia](#metodologia)
