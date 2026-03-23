@@ -38,6 +38,12 @@ const EMA_ALPHA_HEART = 0.15;
 const EMA_ALPHA_RESP  = 0.10;
 const SNR_MIN_DB      = 2.0;
 
+// Frontal flash (low-light boost)
+const BRIGHTNESS_THRESHOLD = 80;  // 0-255, below this triggers flash
+const BRIGHTNESS_EMA_ALPHA = 0.1;
+let smoothBrightness = null;
+let flashActive      = false;      // one-way latch per session
+
 // History for summary (sampled every ~5s when valid)
 let heartHistory = [];   // [{bpm, snrDb}]
 let respHistory  = [];   // [{rpm}]
@@ -121,6 +127,46 @@ function extractCombinedRoi(landmarks) {
   let r = 0, g = 0, b = 0;
   for (const roi of rois) { r += roi.r; g += roi.g; b += roi.b; }
   return { r: r / rois.length, g: g / rois.length, b: b / rois.length };
+}
+
+// ─── Brightness detection ────────────────────────────────────────────────────
+
+function measureBrightness() {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) return null;
+
+  // Sample a small center region for speed (100x100 or less)
+  const sw = Math.min(100, vw), sh = Math.min(100, vh);
+  const sx = Math.floor((vw - sw) / 2), sy = Math.floor((vh - sh) / 2);
+  const imgData = offCtx.getImageData(sx, sy, sw, sh);
+  const d = imgData.data;
+  let sum = 0;
+  const total = sw * sh;
+  for (let i = 0; i < total; i++) {
+    sum += 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
+  }
+  return sum / total;
+}
+
+// ─── Flash overlay (vertical ellipse with white surround) ───────────────────
+
+function drawFlashOverlay() {
+  const w = canvas.width, h = canvas.height;
+  const cx = w / 2, cy = h / 2;
+  const rx = w * 0.30;  // ellipse horizontal radius (~60% width)
+  const ry = h * 0.40;  // ellipse vertical radius (~80% height)
+
+  // Fill entire canvas white
+  ctx.save();
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, w, h);
+
+  // Cut out the ellipse (make it transparent to show camera feed)
+  ctx.globalCompositeOperation = "destination-out";
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
 }
 
 // ─── Canvas overlay drawing ───────────────────────────────────────────────────
@@ -235,6 +281,19 @@ async function processFrame(timestampMs) {
   // Draw video to offscreen for pixel extraction (no CSS transforms)
   offCtx.drawImage(video, 0, 0, vw, vh);
 
+  // Check brightness and latch flash if too dark
+  if (!flashActive) {
+    const brightness = measureBrightness();
+    if (brightness !== null) {
+      smoothBrightness = smoothBrightness === null
+        ? brightness
+        : BRIGHTNESS_EMA_ALPHA * brightness + (1 - BRIGHTNESS_EMA_ALPHA) * smoothBrightness;
+      if (smoothBrightness < BRIGHTNESS_THRESHOLD) {
+        flashActive = true;
+      }
+    }
+  }
+
   // Detect face (pass video element; MediaPipe reads at native resolution)
   const landmarks = detectFace(video, timestampMs);
 
@@ -244,6 +303,11 @@ async function processFrame(timestampMs) {
   }
 
   drawOverlay(landmarks, lastHeartResult?.snrDb ?? null);
+
+  // Draw flash overlay on top if latched
+  if (flashActive) {
+    drawFlashOverlay();
+  }
 
   if (timestampMs - lastComputeMs > COMPUTE_INTERVAL_MS) {
     lastComputeMs = timestampMs;
@@ -408,8 +472,10 @@ startBtn.addEventListener("click", async () => {
     lastComputeMs   = 0;
     lastSampleMs    = 0;
     sessionStart    = Date.now();
-    smoothBpm       = null;
-    smoothRpm       = null;
+    smoothBpm        = null;
+    smoothRpm        = null;
+    smoothBrightness = null;
+    flashActive      = false;
     resetBuffers();
     stopBtn.hidden = false;
     requestAnimationFrame(processFrame);
