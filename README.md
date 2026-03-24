@@ -7,7 +7,7 @@ Este repositório contém **duas partes complementares**:
 | Parte | Descrição | Localização |
 |-------|-----------|-------------|
 | **Experimento Python** | Pipeline desktop para pesquisa e comparação de métodos rPPG (GREEN, CHROM, POS). Foco em experimentação e análise científica detalhada. | `quick_rppg_experiment.py` |
-| **Web App (Vercel)** | Aplicação mobile-first para uso por qualquer usuário no navegador. Implementa exclusivamente o método CHROM, seguindo as recomendações da literatura científica. Disponível em: https://eye-tracker-nine-vercel.app | `webapp/` |
+| **Web App (Vercel)** | Aplicação mobile-first para uso por qualquer usuário no navegador. Implementa exclusivamente o método CHROM, seguindo as recomendações da literatura científica. Disponível em: https://eye-tracker-nine.vercel.app | `webapp/` |
 
 ### Diferenças entre as partes
 
