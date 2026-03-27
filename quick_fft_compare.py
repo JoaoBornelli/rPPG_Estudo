@@ -11,7 +11,7 @@ from mediapipe.tasks.python import vision
 # Config
 # =========================
 MODEL_PATH = "face_landmarker.task"
-SOURCE = "media/1 eu.mp4"  # 0 para webcam
+SOURCE = 0  # 0 para webcam
 HEART_WINDOW_SEC = 20.0
 MIN_HEART_WINDOW_SEC = 10.0
 RESP_WINDOW_SEC = 30.0
@@ -28,7 +28,7 @@ RR_MIN_SNR_DB = -5.0
 SMOOTHING_LEN = 5
 
 
-FOREHEAD_IDX = [10, 67, 103, 109, 338, 297, 332, 284]
+FOREHEAD_IDX = [54, 10, 67, 103, 109, 338, 297, 332, 284]
 LEFT_CHEEK_IDX = [117, 118, 50, 205, 187, 147, 213, 192]
 RIGHT_CHEEK_IDX = [346, 347, 280, 425, 411, 376, 433, 416]
 
@@ -370,7 +370,9 @@ def main() -> None:
         for m in methods
     }
     last_canvas = np.zeros((920, 1200, 3), dtype=np.uint8)
+    last_video_display = None
     no_face_count = 0
+    current_bpm = None
 
     while cap.isOpened():
         ok, frame_bgr = cap.read()
@@ -388,9 +390,12 @@ def main() -> None:
 
         mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
         res = detector.detect_for_video(mp_img, t_ms)
+        video_display = frame_bgr.copy()
+
         if res.face_landmarks:
             no_face_count = 0
             lm = res.face_landmarks[0]
+            h, w = frame_rgb.shape[:2]
             mask = build_roi_mask(frame_rgb, lm)
             px = frame_rgb[mask == 255]
             if px.size > 0:
@@ -398,6 +403,29 @@ def main() -> None:
                 g_buf.append(float(np.mean(px[:, 1])))
                 b_buf.append(float(np.mean(px[:, 2])))
                 ts_buf.append(t_ms)
+
+            # Draw ROI landmarks on video
+            forehead = landmark_points(lm, FOREHEAD_IDX, w, h)
+            left_cheek = landmark_points(lm, LEFT_CHEEK_IDX, w, h)
+            right_cheek = landmark_points(lm, RIGHT_CHEEK_IDX, w, h)
+
+            c_x = np.mean(forehead[:, 0])
+            c_y = np.mean(forehead[:, 1])
+            forehead_scaled = np.stack(
+                [c_x + (forehead[:, 0] - c_x) * 1.12, c_y + (forehead[:, 1] - c_y) * 1.18],
+                axis=1,
+            )
+            forehead_scaled[:, 0] = np.clip(forehead_scaled[:, 0], 0, w - 1)
+            forehead_scaled[:, 1] = np.clip(forehead_scaled[:, 1], 0, h - 1)
+            forehead_scaled = forehead_scaled.astype(np.int32)
+
+            cv.polylines(video_display, [cv.convexHull(forehead_scaled)], True, (0, 255, 0), 2)
+            cv.polylines(video_display, [cv.convexHull(left_cheek)], True, (255, 0, 0), 2)
+            cv.polylines(video_display, [cv.convexHull(right_cheek)], True, (0, 0, 255), 2)
+
+            # Draw individual landmark points
+            for pt in np.vstack([forehead_scaled, left_cheek, right_cheek]):
+                cv.circle(video_display, tuple(pt), 2, (255, 255, 0), -1)
         else:
             no_face_count += 1
             if no_face_count > int(nominal_fps):
@@ -447,6 +475,10 @@ def main() -> None:
                         )
                         state[name]["hr_prev"] = heart_bpm
 
+                        # Update current BPM from CHROM method
+                        if name == "CHROM":
+                            current_bpm = heart_bpm
+
                     # resp window
                     r_r, ts_r = extract_window(r_all, ts_all, RESP_WINDOW_SEC)
                     g_r, _ = extract_window(g_all, ts_all, RESP_WINDOW_SEC)
@@ -495,6 +527,16 @@ def main() -> None:
                 last_canvas = np.full((920, 1200, 3), 16, dtype=np.uint8)
                 cv.putText(last_canvas, "Aguardando dados suficientes...", (30, 80), cv.FONT_HERSHEY_SIMPLEX, 1.0, (0, 180, 255), 2)
 
+        # Add BPM text to video display
+        if current_bpm is not None:
+            bpm_text = f"BPM: {current_bpm:.1f}"
+            cv.putText(video_display, bpm_text, (20, 60), cv.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 0), 3)
+        else:
+            cv.putText(video_display, "BPM: --", (20, 60), cv.FONT_HERSHEY_SIMPLEX, 1.5, (0, 165, 255), 3)
+
+        last_video_display = video_display
+
+        cv.imshow("Webcam with Landmarks", last_video_display)
         cv.imshow("FFT Compare: GREEN vs POS vs CHROM", last_canvas)
         if cv.waitKey(1) & 0xFF == 27:
             break
