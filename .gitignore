@@ -1,6 +1,7 @@
 __pycache__/
 /.venv
 /media
+/logs
 /src
 /tests
 run_realtime.py

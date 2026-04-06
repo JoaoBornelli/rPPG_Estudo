@@ -2,6 +2,9 @@ import cv2 as cv
 import mediapipe as mp
 import numpy as np
 import time
+import csv
+import os
+from datetime import datetime
 from collections import deque
 
 from mediapipe.tasks import python
@@ -408,6 +411,11 @@ rppg_last_resp = None
 rppg_last_compute_ms = 0
 RPPG_COMPUTE_INTERVAL_MS = 1000
 
+# Fatigue log — 1 sample per second
+fatigue_log = []
+log_last_time = 0.0
+log_start_datetime = None
+
 # =====================================================
 # Loop principal
 # =====================================================
@@ -610,6 +618,22 @@ while cap.isOpened():
             fatigue_alert = perclos > FATIGUE_ALERT_PERCLOS
             buf_duration = mon["fatigue_buf"][-1][0] - mon["fatigue_buf"][0][0] if total > 1 else 0
 
+            # --- Fatigue log (1 sample/sec) ---
+            if log_start_datetime is None:
+                log_start_datetime = datetime.now()
+            if now - log_last_time >= 1.0:
+                log_last_time = now
+                elapsed_s = (timestamp_ms - cal_start_ms) / 1000.0 if cal_start_ms else 0
+                fatigue_log.append({
+                    "timestamp_s": round(elapsed_s, 1),
+                    "datetime": datetime.now().isoformat(timespec="seconds"),
+                    "perclos_pct": round(perclos, 1),
+                    "blinks_per_min": round(blinks_per_min, 1),
+                    "ear_avg": round(ear_avg, 4),
+                    "bpm": round(rppg_smooth_bpm, 1) if rppg_smooth_bpm is not None else "",
+                    "rpm": round(rppg_smooth_rpm, 1) if rppg_smooth_rpm is not None else "",
+                })
+
             # --- Console ---
             if fatigue_alert:
                 print(f"[{timestamp_ms / 1000:.1f}s] FADIGA: PERCLOS={perclos:.1f}%")
@@ -685,3 +709,96 @@ while cap.isOpened():
 
 cap.release()
 cv.destroyAllWindows()
+
+# =====================================================
+# Export fatigue log to CSV
+# =====================================================
+if fatigue_log:
+    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+    os.makedirs(log_dir, exist_ok=True)
+
+    ts_label = datetime.now().strftime("%Y-%m-%d_%Hh%M")
+    csv_path = os.path.join(log_dir, f"fatigue_{ts_label}.csv")
+
+    fields = ["timestamp_s", "datetime", "perclos_pct", "blinks_per_min", "ear_avg", "bpm", "rpm"]
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(fatigue_log)
+
+    print(f"\nLog salvo: {csv_path} ({len(fatigue_log)} amostras)")
+
+    # =====================================================
+    # Generate fatigue report graph
+    # =====================================================
+    import matplotlib.pyplot as plt
+
+    ts_min = [r["timestamp_s"] / 60.0 for r in fatigue_log]
+    perclos_vals = [r["perclos_pct"] for r in fatigue_log]
+    blink_vals = [r["blinks_per_min"] for r in fatigue_log]
+    ear_vals = [r["ear_avg"] for r in fatigue_log]
+    bpm_vals = [r["bpm"] if r["bpm"] != "" else None for r in fatigue_log]
+    rpm_vals = [r["rpm"] if r["rpm"] != "" else None for r in fatigue_log]
+
+    duration_min = ts_min[-1] if ts_min else 0
+    start_str = log_start_datetime.strftime("%Y-%m-%d %H:%M") if log_start_datetime else "?"
+
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 8), sharex=True)
+    fig.suptitle(f"Relatório de Fadiga — {start_str} ({duration_min:.0f} min)", fontsize=14)
+
+    # --- Subplot 1: PERCLOS ---
+    ax1.plot(ts_min, perclos_vals, color="#d32f2f", linewidth=1.2, label="PERCLOS %")
+    ax1.axhline(y=FATIGUE_ALERT_PERCLOS, color="#ff8a80", linestyle="--", linewidth=0.8, label=f"Alerta ({FATIGUE_ALERT_PERCLOS}%)")
+    ax1.fill_between(ts_min, perclos_vals, alpha=0.15, color="#d32f2f")
+    ax1.set_ylabel("PERCLOS (%)")
+    ax1.set_ylim(0, max(max(perclos_vals) * 1.2, FATIGUE_ALERT_PERCLOS * 1.5))
+    ax1.legend(loc="upper right", fontsize=8)
+    ax1.grid(True, alpha=0.3)
+
+    # --- Subplot 2: Blinks/min + EAR ---
+    ax2.plot(ts_min, blink_vals, color="#1565c0", linewidth=1.2, label="Piscadas/min")
+    ax2.set_ylabel("Piscadas/min", color="#1565c0")
+    ax2.tick_params(axis="y", labelcolor="#1565c0")
+    ax2.grid(True, alpha=0.3)
+
+    ax2b = ax2.twinx()
+    ax2b.plot(ts_min, ear_vals, color="#ff8f00", linewidth=1.0, alpha=0.7, label="EAR médio")
+    ax2b.set_ylabel("EAR", color="#ff8f00")
+    ax2b.tick_params(axis="y", labelcolor="#ff8f00")
+
+    lines2 = ax2.get_legend_handles_labels()
+    lines2b = ax2b.get_legend_handles_labels()
+    ax2.legend(lines2[0] + lines2b[0], lines2[1] + lines2b[1], loc="upper right", fontsize=8)
+
+    # --- Subplot 3: BPM + RPM ---
+    bpm_ts = [t for t, v in zip(ts_min, bpm_vals) if v is not None]
+    bpm_clean = [v for v in bpm_vals if v is not None]
+    rpm_ts = [t for t, v in zip(ts_min, rpm_vals) if v is not None]
+    rpm_clean = [v for v in rpm_vals if v is not None]
+
+    if bpm_clean:
+        ax3.plot(bpm_ts, bpm_clean, color="#2e7d32", linewidth=1.2, label="BPM")
+    ax3.set_ylabel("BPM", color="#2e7d32")
+    ax3.tick_params(axis="y", labelcolor="#2e7d32")
+    ax3.set_xlabel("Tempo (min)")
+    ax3.grid(True, alpha=0.3)
+
+    ax3b = ax3.twinx()
+    if rpm_clean:
+        ax3b.plot(rpm_ts, rpm_clean, color="#7b1fa2", linewidth=1.0, alpha=0.7, label="RPM")
+    ax3b.set_ylabel("RPM", color="#7b1fa2")
+    ax3b.tick_params(axis="y", labelcolor="#7b1fa2")
+
+    lines3 = ax3.get_legend_handles_labels()
+    lines3b = ax3b.get_legend_handles_labels()
+    ax3.legend(lines3[0] + lines3b[0], lines3[1] + lines3b[1], loc="upper right", fontsize=8)
+
+    plt.tight_layout()
+
+    png_path = csv_path.replace(".csv", ".png")
+    fig.savefig(png_path, dpi=150)
+    print(f"Gráfico salvo: {png_path}")
+
+    plt.show()
+else:
+    print("\nNenhum dado de fadiga coletado — log não gerado.")
