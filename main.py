@@ -36,10 +36,6 @@ FATIGUE_WINDOW_SEC = 180.0
 PERCLOS_80_RATIO = 0.80
 FATIGUE_ALERT_PERCLOS = 15.0
 
-# Identificação facial — distâncias par-a-par normalizadas
-SIGNATURE_IDX = [33, 133, 362, 263, 1, 152, 10, 61, 291]
-FACE_MATCH_THRESHOLD = 0.15
-
 # rPPG — CHROM (de Haan & Jeanne 2013)
 FOREHEAD_IDX = [54, 10, 67, 103, 109, 338, 297, 332, 284]
 LEFT_CHEEK_IDX = [117, 118, 50, 205, 187, 147, 213, 192]
@@ -61,33 +57,6 @@ RESP_BAND_HZ = (0.1, 0.5)
 WELCH_SEG_SEC_RESP = 20.0
 WELCH_OVERLAP_RESP = 0.75
 EMA_ALPHA_RESP = 0.10
-
-
-# =====================================================
-# Face signature
-# =====================================================
-def compute_face_signature(face_landmarks, w, h):
-    pts = []
-    for idx in SIGNATURE_IDX:
-        lm = face_landmarks[idx]
-        pts.append([lm.x * w, lm.y * h])
-    pts = np.array(pts)
-
-    n = len(pts)
-    dists = []
-    for i in range(n):
-        for j in range(i + 1, n):
-            dists.append(np.linalg.norm(pts[i] - pts[j]))
-    dists = np.array(dists)
-
-    max_dist = np.max(dists)
-    if max_dist < 1e-6:
-        return None
-    return dists / max_dist
-
-
-def signature_distance(sig_a, sig_b):
-    return float(np.linalg.norm(sig_a - sig_b))
 
 
 # =====================================================
@@ -408,11 +377,8 @@ cal_phase = "open"  # "open" → "closed" → "done"
 cal_start_ms = None
 cal_open_samples = []
 cal_closed_samples_ts = []
-cal_signature_samples = []
-
 # Dados do rosto calibrado (imutáveis após calibração)
 calibrated = False
-calibrated_signature = None  # assinatura do rosto calibrado
 ear_open = None
 ear_closed = None
 perclos_threshold = None
@@ -429,7 +395,6 @@ mon = {
 }
 
 no_face_frames = 0
-is_calibrated_person = False
 
 # rPPG — buffers de cor
 rppg_r_buf = []
@@ -461,8 +426,6 @@ while cap.isOpened():
 
     if not detection_result.face_landmarks:
         no_face_frames += 1
-        if no_face_frames == NO_FACE_RESET_FRAMES:
-            is_calibrated_person = False
 
         cv.putText(annotated_frame, "Sem face detectada", (10, 30),
                    cv.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
@@ -482,8 +445,6 @@ while cap.isOpened():
         for idx in LEFT_EYE_EAR:
             pt = get_landmark_px(lm, idx, w, h).astype(int)
             cv.circle(annotated_frame, tuple(pt), 2, (0, 0, 255), -1)
-
-        signature = compute_face_signature(lm, w, h)
 
         # --- rPPG: coleta RGB das ROIs a cada frame ---
         roi_rgb = extract_combined_roi(rgb_frame, lm)
@@ -539,10 +500,6 @@ while cap.isOpened():
             bar_w = 300
             bar_x = w // 2 - bar_w // 2
 
-            # Coleta assinatura durante toda a calibração
-            if signature is not None:
-                cal_signature_samples.append(signature)
-
             # --- Fase 1: Olhos abertos (5s) ---
             if cal_phase == "open":
                 cal_open_samples.append(ear_avg)
@@ -591,53 +548,16 @@ while cap.isOpened():
                     ear_range = ear_open - ear_closed
                     perclos_threshold = ear_closed + ear_range * (1.0 - PERCLOS_80_RATIO)
 
-                    # Salva assinatura média do rosto calibrado
-                    calibrated_signature = np.mean(np.array(cal_signature_samples), axis=0)
                     calibrated = True
-                    is_calibrated_person = True
 
                     print(f"Fase 2 concluida — EAR fechado: {ear_closed:.3f}")
                     print(f"PERCLOS P80 threshold: {perclos_threshold:.3f}")
                     print(f"Range: [{ear_closed:.3f} (fechado) ... {ear_open:.3f} (aberto)]")
-                    print(f"Assinatura facial salva ({len(cal_signature_samples)} amostras)")
 
         # =============================================
-        # Pós-calibração: verifica se é o rosto certo
-        # =============================================
-        elif not is_calibrated_person:
-            if signature is not None and calibrated_signature is not None:
-                dist = signature_distance(signature, calibrated_signature)
-                if dist <= FACE_MATCH_THRESHOLD:
-                    is_calibrated_person = True
-                    # Reseta monitoramento ao reconhecer
-                    mon = {
-                        "ear_buf_r": deque(maxlen=MOVING_AVG_LEN),
-                        "ear_buf_l": deque(maxlen=MOVING_AVG_LEN),
-                        "blink_closed_frames": 0,
-                        "in_blink": False,
-                        "blink_last_time": None,
-                        "blink_intervals": deque(maxlen=BLINK_INTERVAL_WINDOW),
-                        "fatigue_buf": deque(),
-                    }
-                    print(f"Rosto calibrado reconhecido (dist={dist:.4f})")
-                else:
-                    cv.putText(annotated_frame, f"Rosto nao reconhecido (dist={dist:.2f})",
-                               (10, 30), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
-
-        # =============================================
-        # Monitoramento (só para o rosto calibrado)
+        # Monitoramento
         # =============================================
         else:
-            # Verifica continuamente se ainda é a mesma pessoa
-            if signature is not None and calibrated_signature is not None:
-                dist = signature_distance(signature, calibrated_signature)
-                if dist > FACE_MATCH_THRESHOLD * 1.5:
-                    is_calibrated_person = False
-                    print(f"Rosto trocou (dist={dist:.4f}) — pausando monitoramento")
-                    cv.imshow("Eye Tracker", cv.cvtColor(annotated_frame, cv.COLOR_RGB2BGR))
-                    timestamp_ms += frame_duration_ms
-                    continue
-
             mon["ear_buf_r"].append(ear_right)
             mon["ear_buf_l"].append(ear_left)
 
