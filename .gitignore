@@ -7,3 +7,4 @@ __pycache__/
 run_realtime.py
 run_video_file.py
 .vercel
+/data
