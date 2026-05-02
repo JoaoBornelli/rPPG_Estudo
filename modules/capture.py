@@ -101,3 +101,7 @@ class Capture:
 
     def release(self):
         self.cap.release()
+        try:
+            self.detector.close()  # MediaPipe FaceLandmarker
+        except Exception:
+            pass

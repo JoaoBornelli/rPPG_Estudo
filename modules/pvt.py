@@ -44,7 +44,7 @@ def compute_pvt_metrics(trials):
     valid_rts = [
         t["rt_ms"] for t in trials
         if t.get("rt_ms") is not None
-        and 100.0 <= t["rt_ms"] <= 30000.0
+        and 100.0 <= t["rt_ms"] < 30000.0  # strict; 30000ms timeout = sleep attack, excluded
         and not t.get("false_start", False)
     ]
     n = len(valid_rts)

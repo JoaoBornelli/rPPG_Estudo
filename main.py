@@ -178,19 +178,24 @@ def _passive_loop(stop_event, cap, perclos, rppg, snapshot):
             if rppg.last_heart is not None:
                 snapshot["snr_db"] = rppg.last_heart["snr_db"]
 
+            # HRV gated on SNR ≥ 2dB (spec §6.5 caveat 2 — low SNR pollutes IBI)
             ibi = rppg.get_ibi_buffer(window_sec=60.0)
-            if ibi is not None:
+            snr_ok = (rppg.last_heart is not None
+                      and rppg.last_heart.get("snr_db", -99.0) >= 2.0)
+            if ibi is not None and snr_ok:
                 hrv = compute_hrv(ibi)
                 if hrv is not None:
                     snapshot.update(hrv)
-        cv.imshow("Check-in - Captura (passivo)",
-                  cv.cvtColor(rgb, cv.COLOR_RGB2BGR))
-        cv.waitKey(1)
 
 
 def main():
     # 1. Seleção de perfil
-    profiles = subjects.list_profiles()
+    try:
+        profiles = subjects.list_profiles()
+    except (RuntimeError, json.JSONDecodeError) as e:
+        print(f"Erro lendo data/profiles.json: {e}")
+        print("Renomeie/remova o arquivo e tente novamente.")
+        return
     action, name = select_profile(profiles)
     if action == "quit":
         return
@@ -225,11 +230,19 @@ def main():
     # PVT-B (3 min) — bloqueante
     trials = run_pvt(duration_sec=180.0)
     pvt_metrics = compute_pvt_metrics(trials)
+    # Spec §8.4: descartar PVT se < 10 trials válidos
+    if pvt_metrics["n_trials"] < 10:
+        pvt_metrics = {
+            "n_trials": pvt_metrics["n_trials"],
+            "mean_rt_ms": None, "mean_inv_rt": None,
+            "lapses": None, "slowest_10pct_inv_rt": None,
+            "false_starts": pvt_metrics["false_starts"],
+        }
 
     stop_event.set()
-    passive_thread.join(timeout=2.0)
+    passive_thread.join()  # no timeout — thread checks stop_event every iteration
+    snapshot = dict(snapshot)  # atomic snapshot copy after writer thread terminated
     cap.release()
-    cv.destroyWindow("Check-in - Captura (passivo)")
 
     # 4. Agrega métricas e avalia
     metrics = {
