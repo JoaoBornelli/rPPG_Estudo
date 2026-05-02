@@ -87,11 +87,66 @@ def _save_session_csv(subject_name, metrics, trials, evaluations, overall, marke
     return path
 
 
+def _draw_calibration_overlay(view, phase, progress, remaining, title, subtitle, no_face=False):
+    """
+    Desenha header/footer translúcidos sobre o frame de vídeo, com countdown
+    centralizado e barra de progresso fina.
+    """
+    h, w = view.shape[:2]
+
+    # Top strip translúcida
+    overlay = view.copy()
+    cv.rectangle(overlay, (0, 0), (w, 80), (21, 17, 15), -1)
+    cv.addWeighted(overlay, 0.85, view, 0.15, 0, view)
+    cv.line(view, (32, 80), (w - 32, 80), (60, 56, 52), 1, cv.LINE_AA)
+    cv.putText(view, title, (32, 44), cv.FONT_HERSHEY_DUPLEX, 0.9,
+               (224, 230, 232), 1, cv.LINE_AA)
+    cv.putText(view, subtitle, (32, 68), cv.FONT_HERSHEY_SIMPLEX, 0.5,
+               (165, 170, 173), 1, cv.LINE_AA)
+
+    if no_face:
+        # Warning bar no topo
+        cv.rectangle(view, (0, 0), (w, 4), (76, 90, 229), -1)
+    else:
+        # Countdown grande, centralizado
+        if remaining is not None:
+            txt = f"{remaining:.1f}"
+            (tw, _), _ = cv.getTextSize(txt, cv.FONT_HERSHEY_DUPLEX, 3.0, 2)
+            cv.putText(view, txt, ((w - tw) // 2, 200),
+                       cv.FONT_HERSHEY_DUPLEX, 3.0, (224, 230, 232), 2, cv.LINE_AA)
+            label = "segundos"
+            (lw, _), _ = cv.getTextSize(label, cv.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+            cv.putText(view, label, ((w - lw) // 2, 232),
+                       cv.FONT_HERSHEY_SIMPLEX, 0.55, (108, 110, 112), 1, cv.LINE_AA)
+
+        # Progress bar fina perto do bottom
+        bar_w = w - 64
+        bar_x = 32
+        bar_y = h - 60
+        cv.rectangle(view, (bar_x, bar_y), (bar_x + bar_w, bar_y + 4),
+                     (45, 40, 36), -1)
+        accent = (118, 192, 121) if phase == "open" else (76, 90, 229)
+        filled = max(0, min(bar_w, int(bar_w * progress)))
+        if filled > 0:
+            cv.rectangle(view, (bar_x, bar_y), (bar_x + filled, bar_y + 4),
+                         accent, -1)
+
+    # Bottom strip translúcida + footer (sempre)
+    overlay = view.copy()
+    cv.rectangle(overlay, (0, h - 36), (w, h), (21, 17, 15), -1)
+    cv.addWeighted(overlay, 0.85, view, 0.15, 0, view)
+    cv.line(view, (32, h - 36), (w - 32, h - 36), (60, 56, 52), 1, cv.LINE_AA)
+    cv.putText(view, "ESC", (32, h - 14), cv.FONT_HERSHEY_SIMPLEX, 0.42,
+               (180, 140, 90), 1, cv.LINE_AA)
+    cv.putText(view, "abortar calibracao", (70, h - 14),
+               cv.FONT_HERSHEY_SIMPLEX, 0.42, (108, 110, 112), 1, cv.LINE_AA)
+
+
 def _calibrate_perclos(cap, perclos):
     """
     Conduz a calibração de 5s aberto + 5s fechado.
-    Mostra preview com barra de progresso na janela "Check-in - Calibracao".
-    Retorna True se calibrou, False se câmera/face falhou.
+    Mostra preview do vídeo com header/footer translúcidos e countdown.
+    Retorna True se calibrou, False se câmera/face falhou ou ESC.
     """
     cal_phase = "open"
     cal_start_ms = None
@@ -100,12 +155,19 @@ def _calibrate_perclos(cap, perclos):
         if out is None:
             return False
         rgb, det, ts = out
-        annotated = rgb.copy()
+        view = cv.cvtColor(rgb, cv.COLOR_RGB2BGR)
+        view = cv.flip(view, 1)
         h, w = rgb.shape[:2]
 
-        if not det.face_landmarks:
-            cv.putText(annotated, "Sem face — alinhe-se a camera", (10, 30),
-                       cv.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+        no_face = not det.face_landmarks
+        progress = 0.0
+        remaining = None
+        title = "Calibracao"
+        subtitle = ""
+
+        if no_face:
+            title = "Calibracao — sem face detectada"
+            subtitle = "Centralize seu rosto na camera. Verifique a iluminacao."
         else:
             lm = det.face_landmarks[0]
             ear_r = eye_aspect_ratio(lm, RIGHT_EYE_EAR, w, h)
@@ -119,7 +181,9 @@ def _calibrate_perclos(cap, perclos):
             if cal_phase == "open":
                 perclos.feed_calibration_open(ear_avg)
                 progress = min(1.0, elapsed / CAL_OPEN_SEC)
-                _draw_cal_bar(annotated, w, "OLHOS ABERTOS", progress, (0, 255, 0))
+                remaining = max(0.0, CAL_OPEN_SEC - elapsed)
+                title = "Fase 1/2 — olhos abertos"
+                subtitle = "Olhe para a camera sem piscar enquanto medimos seu olho aberto."
                 if elapsed >= CAL_OPEN_SEC:
                     perclos.finish_calibration_open()
                     cal_phase = "closed"
@@ -127,25 +191,20 @@ def _calibrate_perclos(cap, perclos):
             elif cal_phase == "closed":
                 perclos.feed_calibration_closed(ear_avg, ts)
                 progress = min(1.0, elapsed / CAL_CLOSED_SEC)
-                _draw_cal_bar(annotated, w, "FECHE OS OLHOS", progress, (0, 0, 255))
+                remaining = max(0.0, CAL_CLOSED_SEC - elapsed)
+                title = "Fase 2/2 — olhos fechados"
+                subtitle = "Feche os olhos confortavelmente. Mediremos entre 1s e 3s pra estabilizar."
                 if elapsed >= CAL_CLOSED_SEC:
                     perclos.finish_calibration_closed(cal_start_ms)
 
-        cv.imshow("Check-in - Calibracao", cv.cvtColor(annotated, cv.COLOR_RGB2BGR))
+        _draw_calibration_overlay(view, cal_phase, progress, remaining,
+                                  title, subtitle, no_face=no_face)
+        cv.imshow("Check-in", view)
         if cv.waitKey(1) & 0xFF == 27:
             return False
 
-    cv.destroyWindow("Check-in - Calibracao")
+    cv.destroyWindow("Check-in")
     return True
-
-
-def _draw_cal_bar(annotated, w, label, progress, color):
-    bar_w = 300
-    bar_x = w // 2 - bar_w // 2
-    cv.rectangle(annotated, (bar_x, 10), (bar_x + bar_w, 35), (80, 80, 80), -1)
-    cv.rectangle(annotated, (bar_x, 10), (bar_x + int(bar_w * progress), 35), color, -1)
-    cv.putText(annotated, label, (bar_x - 20, 55),
-               cv.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
 
 def _passive_loop(stop_event, cap, perclos, rppg, snapshot):
