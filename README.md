@@ -71,6 +71,35 @@ A interface exibe três tiles em tempo real (facial landmarks, heatmap CHROM das
 
 ---
 
+## Check-in Multi-Métrica de Aptidão (PVT + HRV + PERCLOS + rPPG)
+
+A partir de 2026-05, o `main.py` executa um **check-in de 3 minutos** que combina quatro eixos independentes de fadiga:
+
+| Eixo | Tipo | Janela | Métrica primária |
+|------|------|--------|------------------|
+| PERCLOS | passivo | 180s | % de tempo com olhos fechados (P80) |
+| rPPG | passivo | 12s | BPM (CHROM + Welch) |
+| HRV ⚠ experimental | passivo | 60s | RMSSD time-domain extraído da onda CHROM |
+| PVT-B | ativo | 3 min | Mean 1/RT (Basner & Dinges 2011) |
+
+**Fluxo:**
+1. Seleção de perfil (lista local em `data/profiles.json`).
+2. Calibração PERCLOS (5s olhos abertos + 5s fechados).
+3. Check-in 3 min: PVT-B em janela Pygame (main thread) + captura OpenCV + PERCLOS/rPPG/HRV em thread auxiliar.
+4. Painel de resultados com 4 tiles, status verde/amarelo/vermelho por eixo e status geral por regra conjuntiva.
+5. Opção de marcar sessão como "descansado" antes de salvar — só nesse caso a sessão alimenta o **baseline pessoal** (Welford rolling).
+6. Cada sessão é gravada em `data/sessions/YYYY-MM-DD_HHMM_<nome>.csv`.
+
+**Avaliação híbrida absoluto/pessoal:** as primeiras 5 sessões usam cutoffs da literatura. Após 5 sessões marcadas como "descansado", os thresholds de cada eixo passam a ser pessoais (vermelho < mean − 1.5·std, amarelo < mean − 0.75·std).
+
+**Por que essa combinação:** PERCLOS captura o eixo ocular passivo, rPPG o cardio, HRV o autonômico (parassimpático), PVT-B o cortical (atenção sustentada — gold standard de fadiga aguda, Basner 2011). UFOV foi avaliado e descartado por falta de validação em smartphone e baixo poder discriminativo em motoristas jovens.
+
+**Status experimental do HRV:** RMSSD/pNN50 extraídos da onda CHROM via detecção de picos `scipy.signal.find_peaks`. A 30 fps a resolução temporal de IBI é ~33ms, o que limita a precisão de RMSSD. Antes de tratar HRV como medição publicável, é necessário (i) trocar o bandpass FFT ideal atual por Butterworth zero-phase, (ii) adicionar parabolic peak interpolation (Gasior 2004), (iii) avaliar bump para 60 fps e (iv) validar contra ground truth (Galaxy Watch ou Polar H10) com Bland-Altman. Até lá, HRV é exibido com tag "experimental" e **não conta** para o status geral.
+
+**Spec completo:** `docs/superpowers/specs/2026-05-01-pvt-hrv-checkin-design.md`.
+
+**Plataforma:** Python desktop nesta fase. Port para a webapp mobile (`webapp/`) é fase 2.
+
 ## Requisitos
 
 ```
@@ -504,4 +533,33 @@ A validação foi realizada de forma **comparativa informal**: as leituras de BP
 [15] M. Gasior and J. L. Gonzalez, "Improving FFT frequency measurement resolution
      by parabolic and Gaussian spectrum interpolation," AIP Conf. Proc., vol. 732,
      pp. 276-285, 2004. CERN: AB-Note-2004-021
+
+[16] D. F. Dinges and J. W. Powell, "Microcomputer analyses of performance on a portable,
+     simple visual RT task during sustained operations," Behav. Res. Methods Instrum.
+     Comput., vol. 17, no. 6, pp. 652-655, 1985.
+
+[17] M. Basner and D. F. Dinges, "Maximizing sensitivity of the PVT to sleep loss,"
+     Sleep, vol. 34, no. 5, pp. 581-591, 2011. DOI: 10.1093/sleep/34.5.581
+
+[18] M. Basner, D. Mollicone, and D. F. Dinges, "Validity and sensitivity of a brief
+     psychomotor vigilance test (PVT-B)," Acta Astronautica, vol. 69, no. 11-12,
+     pp. 949-959, 2011. DOI: 10.1016/j.actaastro.2011.07.015
+
+[19] P. F. Brunet et al., "sleep-2-Peak: a smartphone application that allows the
+     assessment of vigilance with the PVT," Behav. Res. Methods, vol. 49,
+     pp. 1907-1916, 2017. DOI: 10.3758/s13428-016-0802-5
+
+[20] J. Vicente et al., "Drowsiness detection using heart rate variability,"
+     Med. Biol. Eng. Comput., vol. 54, pp. 927-937, 2016.
+
+[21] M. Munoz et al., "Validity of (ultra-)short recordings for HRV measurements,"
+     PLoS ONE, vol. 10, no. 9, p. e0138921, 2015.
+
+[22] Task Force of ESC and NASPE, "Heart rate variability: Standards of measurement,
+     physiological interpretation and clinical use," Circulation, vol. 93, no. 5,
+     pp. 1043-1065, 1996.
+
+[23] D. Nunan, G. R. H. Sandercock, and D. A. Brodie, "A quantitative systematic
+     review of normal values for short-term heart rate variability in healthy adults,"
+     PACE, vol. 33, pp. 1407-1417, 2010.
 ```
